@@ -1,0 +1,116 @@
+{
+  "name": "j2magicwand",
+  "displayName": "J2 Magic Wand",
+  "description": "Enhanced J2 template support with YAML-based placeholders",
+  "version": "0.0.4",
+  "author": "Kazinskiy",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:j2"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "j2",
+        "aliases": [
+          "J2 Template",
+          "j2"
+        ],
+        "extensions": [
+          ".j2"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "j2",
+        "scopeName": "source.j2",
+        "path": "./syntaxes/j2.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "j2magicwand.setYamlPath",
+        "title": "J2 Magic Wand: Set YAML Paths"
+      },
+      {
+        "command": "j2magicwand.goToDefinition",
+        "title": "J2 Magic Wand: Go to Variable Definition"
+      },
+      {
+        "command": "j2magicwand.setCodeLensTitle",
+        "title": "J2 Magic Wand: Set CodeLens Title"
+      },
+      {
+        "command": "j2magicwand.renderView",
+        "title": "J2 Magic Wand: Show Rendered View"
+      }
+    ],
+    "configuration": {
+      "title": "J2 Magic Wand",
+      "properties": {
+        "j2magicwand.yamlPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Paths to YAML files containing placeholder definitions. Later files override earlier ones.",
+          "maxItems": 5
+        },
+        "j2magicwand.codeLensTitle": {
+          "type": "string",
+          "default": "To YAML!!!",
+          "description": "The text shown in the CodeLens above placeholders. You can use {variable} to include the variable name."
+        },
+        "j2magicwand.vsixScanFolder": {
+          "type": "string",
+          "default": "c:\\soft\\.dotnet-tools",
+          "description": "Folder to scan for j2magicwand VSIX updates."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "node ./out/test/runTest.js",
+    "test:watch": "npm run test -- --watch",
+    "test:coverage": "npm run test -- --coverage",
+    "test:debug": "npm run test -- --debug"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/js-yaml": "^4.0.9",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.56.0",
+    "glob": "^11.0.2",
+    "minimatch": "^3.1.2",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "publisher": "j2magicwand",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/j2magicwand"
+  }
+}

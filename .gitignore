@@ -1,0 +1,51 @@
+# Node modules
+node_modules/
+
+# Build output
+dist/
+out/
+
+# VS Code settings
+.vscode/
+.vscode-test/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temp
+*.log
+tmp/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# VSIX packages
+*.vsix
+
+# Coverage
+coverage/
+.nyc_output/
+
+# Yarn
+.yarn/
+.pnp.*
+.yarnrc
+
+# TypeScript
+*.tsbuildinfo
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Test
+.vscode-test/
+test-results/ 

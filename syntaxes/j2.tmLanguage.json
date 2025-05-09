@@ -1,0 +1,17 @@
+{
+  "name": "J2 Template",
+  "scopeName": "source.j2",
+  "patterns": [
+    {
+      "name": "meta.template.j2",
+      "begin": "{{",
+      "end": "}}",
+      "patterns": [
+        {
+          "name": "variable.parameter.j2",
+          "match": "\\w+"
+        }
+      ]
+    }
+  ]
+} 
