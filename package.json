@@ -2,7 +2,7 @@
   "name": "j2magicwand",
   "displayName": "J2 Magic Wand",
   "description": "Enhanced J2 template support with YAML-based placeholders",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "author": "Kazinskiy",
   "engines": {
     "vscode": "^1.85.0"
@@ -75,6 +75,14 @@
           "type": "string",
           "default": "c:\\soft\\.dotnet-tools",
           "description": "Folder to scan for j2magicwand VSIX updates."
+        },
+        "j2magicwand.filePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": ["**/*.j2"],
+          "description": "Glob patterns for files that should be handled by the extension. Example: ['**/appsettings.*.j2', '**/config.*.j2']"
         }
       }
     }

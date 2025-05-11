@@ -8,10 +8,12 @@ import { logger, parseVsixVersion, compareVersions, getConfig, isJ2Template } fr
 import { J2Diagnostics } from './diagnostics';
 import { J2PlaceholderProvider } from './placeholderProvider';
 import { J2RenderView } from './renderView';
+import { HotReload } from './hotReload';
 
 let diagnostics: J2Diagnostics;
 let placeholderProvider: J2PlaceholderProvider;
 let renderView: J2RenderView;
+let hotReload: HotReload;
 const statusBarItems: vscode.StatusBarItem[] = [];
 
 /**
@@ -19,112 +21,215 @@ const statusBarItems: vscode.StatusBarItem[] = [];
  * It sets up all core features: diagnostics, CodeLens, completion, commands, and status bar items.
  * @param context The extension context provided by VS Code
  */
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
 	logger.info('Extension activated');
+
+	// Initialize hot reload (will only activate in development mode)
+	hotReload = new HotReload(context);
+	context.subscriptions.push(hotReload);
 
 	// Initialize diagnostics, placeholder provider, and render view
 	diagnostics = new J2Diagnostics();
 	placeholderProvider = new J2PlaceholderProvider();
-	renderView = new J2RenderView();
+	renderView = new J2RenderView(context);
 
 	// Check for VSIX updates in the configured folder
 	checkForVsixUpdate();
 
 	// On activation, update diagnostics for all already-open J2 documents
-	vscode.workspace.textDocuments.forEach(document => {
-		if (isJ2Template(document)) {
+	for (const document of vscode.workspace.textDocuments) {
+		if (await isJ2Template(document)) {
 			diagnostics.updateDiagnostics(document);
 		}
-	});
+	}
 
 	// Register all extension commands
 	context.subscriptions.push(
 		// Command to set YAML file paths for placeholder definitions
 		vscode.commands.registerCommand('j2magicwand.setYamlPath', async () => {
-			logger.info('Setting YAML paths...');
 			const config = vscode.workspace.getConfiguration('j2magicwand');
-			const currentPaths = config.get('yamlPaths', []) as string[];
+			let currentPaths = config.get('yamlPaths', []) as string[];
+			const environments = ['local', 'dev', 'test', 'lt', 'preprod', 'prod'];
+			const globalStoragePath = vscode.extensions.getExtension('j2magicwand.j2magicwand')?.extensionPath || '';
+			const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
 
-			// Create quick pick items for existing paths
-			const quickPickItems: vscode.QuickPickItem[] = currentPaths.map((path, index) => ({
-				label: `Path ${index + 1}: ${path}`,
-				description: 'Click to edit',
-				detail: path
-			}));
-
-			quickPickItems.push({
-				label: 'Add new path',
-				description: 'Add a new YAML file path'
-			});
-
-			if (currentPaths.length > 0) {
-				quickPickItems.push({
-					label: 'Remove path',
-					description: 'Remove an existing YAML file path'
-				});
+			// Helper to get default service name
+			function getDefaultServiceName(): string {
+				// Try to use the last J2 document from renderView
+				if (renderView && renderView.lastJ2DocumentUri) {
+					const filePath = renderView.lastJ2DocumentUri.fsPath;
+					return path.basename(path.dirname(filePath));
+				}
+				// Fallback to active editor
+				const editor = vscode.window.activeTextEditor;
+				if (editor && editor.document.languageId === 'j2') {
+					const filePath = editor.document.uri.fsPath;
+					return path.basename(path.dirname(filePath));
+				}
+				return 'service';
 			}
 
-			const selected = await vscode.window.showQuickPick(quickPickItems, {
-				placeHolder: 'Select a path to edit, add new path, or remove path'
-			});
-
-			if (!selected) {
-				logger.info('Path selection cancelled');
-				return;
+			// Helper to load all saved configs
+			function loadAllConfigs(): Array<{ serviceName: string; environment: string; yamlPaths: string[] }> {
+				if (fs.existsSync(saveFile)) {
+					try {
+						return JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+					} catch {
+						return [];
+					}
+				}
+				return [];
 			}
 
-			if (selected.label === 'Remove path') {
-				const removeItems = currentPaths.map((path, index) => ({
-					label: `Path ${index + 1}: ${path}`,
-					description: 'Click to remove',
-					detail: path
+			// Helper to save all configs
+			function saveAllConfigs(configs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }>): void {
+				fs.writeFileSync(saveFile, JSON.stringify(configs, null, 2));
+			}
+
+			// Helper to refresh the webview after yamlPaths changes
+			function refreshJ2Webview(): void {
+				const updateAllJ2Diagnostics = (): void => {
+					vscode.workspace.textDocuments.forEach(doc => {
+						if (doc.languageId === 'j2' && diagnostics) {
+							diagnostics.updateDiagnostics(doc);
+						}
+					});
+				};
+				const editor = vscode.window.activeTextEditor;
+				if (editor && editor.document.languageId === 'j2' && renderView) {
+					renderView.updateRenderView(editor.document);
+					updateAllJ2Diagnostics();
+				} else if (renderView && renderView.lastJ2DocumentUri) {
+					vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+						renderView.updateRenderView(doc);
+						updateAllJ2Diagnostics();
+					});
+				}
+			}
+
+			while (true) {
+				const fileItems = currentPaths.map((path, idx) => ({
+					label: path,
+					description: [
+						idx > 0 ? '↑ Move Up' : '',
+						idx < currentPaths.length - 1 ? '↓ Move Down' : '',
+						'✎ Edit',
+						'✖ Remove'
+					].filter(Boolean).join(' | ')
 				}));
 
-				const pathToRemove = await vscode.window.showQuickPick(removeItems, {
-					placeHolder: 'Select a path to remove'
+				fileItems.push({ label: '$(file-add) Choose YAML file', description: '' });
+				fileItems.push({ label: '$(cloud-upload) Save', description: 'Save current YAML config' });
+				fileItems.push({ label: '$(cloud-download) Load', description: 'Load a saved YAML config' });
+
+				const selected = await vscode.window.showQuickPick(fileItems, {
+					placeHolder: 'Select a YAML file to manage, save, or load'
 				});
+				if (!selected) {return;}
 
-				if (pathToRemove) {
-					const pathIndex = removeItems.indexOf(pathToRemove);
-					const newPaths = [...currentPaths];
-					newPaths.splice(pathIndex, 1);
-					await config.update('yamlPaths', newPaths, true);
-					vscode.window.showInformationMessage(`YAML path removed: ${pathToRemove.detail}`);
+				if (selected.label === '$(file-add) Choose YAML file') {
+					if (currentPaths.length >= 5) {
+						vscode.window.showErrorMessage('Maximum of 5 YAML paths allowed');
+						continue;
+					}
+					const uris = await vscode.window.showOpenDialog({
+						canSelectFiles: true,
+						canSelectFolders: false,
+						canSelectMany: false,
+						openLabel: 'Select YAML file',
+						filters: {
+							'YAML files': ['yaml', 'yml']
+						}
+					});
+					if (uris && uris.length > 0) {
+						currentPaths.push(uris[0].fsPath);
+						await config.update('yamlPaths', currentPaths, true);
+						refreshJ2Webview();
+						continue;
+					}
 				}
-				return;
-			}
+				if (selected.label === '$(cloud-upload) Save') {
+					// Prompt for service name
+					const defaultService = getDefaultServiceName();
+					const serviceName = await vscode.window.showInputBox({
+						prompt: 'Enter service name',
+						value: defaultService
+					}) || defaultService;
+					// Prompt for environment
+					const environment = await vscode.window.showQuickPick(environments, {
+						placeHolder: 'Select environment',
+						canPickMany: false
+					}) || 'test';
+					// Save config
+					const allConfigs = loadAllConfigs();
+					// Remove existing config for this service/env
+					const filtered = allConfigs.filter((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+						!(c.serviceName === serviceName && c.environment === environment));
+					filtered.push({ serviceName, environment, yamlPaths: currentPaths });
+					saveAllConfigs(filtered);
+					// Store last used environment
+					context.globalState.update('j2magicwand.lastEnvironment', environment);
+					context.globalState.update('j2magicwand.lastService', serviceName);
+					refreshJ2Webview();
+					continue;
+				}
+				if (selected.label === '$(cloud-download) Load') {
+					const allConfigs = loadAllConfigs();
+					if (allConfigs.length === 0) {
+						vscode.window.showWarningMessage('No saved YAML configs found.');
+						continue;
+					}
+					// Try to preselect current service/env
+					const defaultService = getDefaultServiceName();
+					const defaultEnv = 'test';
+					const items = allConfigs.map((c: { serviceName: string; environment: string; yamlPaths: string[] }) => ({
+						label: `${c.serviceName} (${c.environment})`,
+						description: c.yamlPaths.join(', '),
+						config: c
+					}));
+					let preselectIdx = items.findIndex(i => i.config.serviceName === defaultService && i.config.environment === defaultEnv);
+					if (preselectIdx === -1) {
+						preselectIdx = 0;
+					}
+					const selectedConfig = await vscode.window.showQuickPick(items, {
+						placeHolder: 'Select a config to load',
+						canPickMany: false
+					});
+					if (selectedConfig) {
+						currentPaths = selectedConfig.config.yamlPaths;
+						await config.update('yamlPaths', currentPaths, true);
+						context.globalState.update('j2magicwand.lastEnvironment', selectedConfig.config.environment);
+						context.globalState.update('j2magicwand.lastService', selectedConfig.config.serviceName);
+						refreshJ2Webview();
+					}
+					continue;
+				}
 
-			let newPath: string | undefined;
-			if (selected.label === 'Add new path') {
-				if (currentPaths.length >= 5) {
-					vscode.window.showErrorMessage('Maximum of 5 YAML paths allowed');
-					return;
-				}
-				newPath = await vscode.window.showInputBox({
-					prompt: 'Enter the path to your YAML file containing placeholder definitions',
-					placeHolder: 'e.g., /path/to/placeholders.yaml'
+				const idx = currentPaths.indexOf(selected.label);
+				const actions: vscode.QuickPickItem[] = [];
+				if (idx > 0) {actions.push({ label: '↑ Move Up' });}
+				if (idx < currentPaths.length - 1) {actions.push({ label: '↓ Move Down' });}
+				actions.push({ label: '✎ Edit' });
+				actions.push({ label: '✖ Remove' });
+				actions.push({ label: 'Cancel' });
+
+				const action = await vscode.window.showQuickPick(actions, {
+					placeHolder: `Action for: ${selected.label}`
 				});
-			} else {
-				const pathIndex = quickPickItems.indexOf(selected);
-				const currentPath = currentPaths[pathIndex];
-				newPath = await vscode.window.showInputBox({
-					value: currentPath,
-					prompt: 'Enter the path to your YAML file containing placeholder definitions',
-					placeHolder: 'e.g., /path/to/placeholders.yaml'
-				});
-			}
+				if (!action || action.label === 'Cancel') {continue;}
 
-			if (newPath) {
-				const newPaths = [...currentPaths];
-				if (selected.label === 'Add new path') {
-					newPaths.push(newPath);
-				} else {
-					const pathIndex = quickPickItems.indexOf(selected);
-					newPaths[pathIndex] = newPath;
+				if (action.label === '↑ Move Up') {
+					[currentPaths[idx - 1], currentPaths[idx]] = [currentPaths[idx], currentPaths[idx - 1]];
+				} else if (action.label === '↓ Move Down') {
+					[currentPaths[idx + 1], currentPaths[idx]] = [currentPaths[idx], currentPaths[idx + 1]];
+				} else if (action.label === '✎ Edit') {
+					const newPath = await vscode.window.showInputBox({ value: currentPaths[idx], prompt: 'Edit YAML file path' });
+					if (newPath) {currentPaths[idx] = newPath;}
+				} else if (action.label === '✖ Remove') {
+					currentPaths.splice(idx, 1);
 				}
-
-				await config.update('yamlPaths', newPaths, true);
-				vscode.window.showInformationMessage(`YAML paths updated: ${newPaths.join(', ')}`);
+				await config.update('yamlPaths', currentPaths, true);
+				refreshJ2Webview();
 			}
 		}),
 
@@ -224,6 +329,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 			renderView.showRenderView(editor.document);
+		}),
+
+		// Register a command to force diagnostics update for all open J2 documents
+		vscode.commands.registerCommand('j2magicwand.forceDiagnostics', () => {
+			vscode.workspace.textDocuments.forEach(doc => {
+				if (doc.languageId === 'j2' && diagnostics) {
+					diagnostics.updateDiagnostics(doc);
+				}
+			});
 		})
 	);
 
@@ -239,21 +353,20 @@ export function activate(context: vscode.ExtensionContext): void {
 		)
 	);
 
-	// Register diagnostics update listeners for J2 templates
+	// Register document change handler
 	context.subscriptions.push(
-		vscode.workspace.onDidChangeTextDocument(e => {
-			if (isJ2Template(e.document)) {
-				diagnostics.updateDiagnostics(e.document);
+		vscode.workspace.onDidChangeTextDocument(async event => {
+			if (await isJ2Template(event.document)) {
+				diagnostics.updateDiagnostics(event.document);
 			}
-		}),
-		vscode.workspace.onDidOpenTextDocument(document => {
-			if (isJ2Template(document)) {
+		})
+	);
+
+	// Register document open handler
+	context.subscriptions.push(
+		vscode.workspace.onDidOpenTextDocument(async document => {
+			if (await isJ2Template(document)) {
 				diagnostics.updateDiagnostics(document);
-			}
-		}),
-		vscode.workspace.onDidCloseTextDocument(document => {
-			if (isJ2Template(document)) {
-				diagnostics.clearDiagnostics();
 			}
 		})
 	);
@@ -309,6 +422,7 @@ export function deactivate(): void {
 	diagnostics.dispose();
 	placeholderProvider.dispose();
 	renderView.dispose();
+	hotReload?.dispose();
 	statusBarItems.forEach(item => item.dispose());
 	logger.info('All components disposed');
 }

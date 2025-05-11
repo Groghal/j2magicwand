@@ -2,6 +2,7 @@
  * Utility functions and logging for the J2 Magic Wand extension.
  */
 import * as vscode from 'vscode';
+import * as path from 'path';
 
 let outputChannel: vscode.OutputChannel;
 
@@ -91,10 +92,27 @@ export function getConfig<T>(key: string, defaultValue: T): T {
 /**
  * Checks if a document is a J2 template.
  * @param document The document to check.
- * @returns True if the file is a J2 template.
+ * @returns Promise that resolves to true if the file is a J2 template.
  */
-export function isJ2Template(document: vscode.TextDocument): boolean {
-    return document.fileName.endsWith('.j2') || document.fileName.endsWith('.j2a');
+export async function isJ2Template(document: vscode.TextDocument): Promise<boolean> {
+    const config = vscode.workspace.getConfiguration('j2magicwand');
+    const filePatterns = config.get('filePatterns', ['**/*.j2']) as string[];
+
+    // If no workspace folder is open, fall back to simple extension check
+    if (!vscode.workspace.workspaceFolders || vscode.workspace.workspaceFolders.length === 0) {
+        return document.fileName.endsWith('.j2');
+    }
+
+    // Check if the file matches any of the configured patterns
+    const _relativePath = path.relative(vscode.workspace.workspaceFolders[0].uri.fsPath, document.uri.fsPath);
+    for (const pattern of filePatterns) {
+        const globPattern = new vscode.RelativePattern(vscode.workspace.workspaceFolders[0], pattern);
+        const files = await vscode.workspace.findFiles(globPattern);
+        if (files.some(file => file.fsPath === document.uri.fsPath)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**

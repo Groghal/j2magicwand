@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: var(--vscode-font-family);
+            padding: 0;
+            margin: 0;
+            color: var(--vscode-editor-foreground);
+            background-color: var(--vscode-editor-background);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        .syntax-status {
+            padding: 8px 12px;
+            font-size: 0.95em;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            background-color: var(--vscode-editor-background);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .syntax-valid {
+            background-color: var(--vscode-testing-iconPassed);
+            color: var(--vscode-editor-background);
+        }
+        .syntax-invalid {
+            background-color: var(--vscode-editorError-background, #ff2d2d);
+            color: #fff !important;
+            border: 1.5px solid var(--vscode-editorError-foreground, #fff);
+            font-weight: bold;
+        }
+        .button-group {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        #yaml-path-btn, #language-selector-btn, #change-env-btn {
+            background-color: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: 1px solid var(--vscode-button-border);
+            padding: 4px 12px;
+            border-radius: 2px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: background-color 0.1s;
+            white-space: nowrap;
+        }
+        #yaml-path-btn:hover, #language-selector-btn:hover, #change-env-btn:hover {
+            background-color: var(--vscode-button-hoverBackground);
+        }
+        .validation-message {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .code-table {
+            display: flex;
+            flex-direction: row;
+            max-width: 100%;
+            overflow-x: auto;
+            background: var(--vscode-editor-background);
+            border-radius: 4px;
+            flex: 1;
+            padding: 20px;
+        }
+        .line-numbers-col {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            background: var(--vscode-editorLineNumber-background, #23272e);
+            border-right: 1px solid var(--vscode-editorLineNumber-activeForeground);
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        .line-number {
+            display: block;
+            width: 2.5em;
+            text-align: right;
+            color: var(--vscode-editorLineNumber-foreground);
+            font-variant-numeric: tabular-nums;
+            height: 1.5em;
+            line-height: 1.5em;
+            font-size: var(--vscode-editor-font-size);
+            font-family: var(--vscode-editor-font-family);
+            vertical-align: top;
+            margin: 0;
+            padding: 0;
+        }
+        .line-number.error {
+            color: var(--vscode-editorError-foreground);
+        }
+        .code-lines-col {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+        }
+        .code-line {
+            display: block;
+            font-family: var(--vscode-editor-font-family);
+            font-size: var(--vscode-editor-font-size);
+            white-space: pre;
+            height: 1.5em;
+            line-height: 1.5em;
+            vertical-align: top;
+            margin: 0;
+            padding: 0;
+            position: relative;
+        }
+        .code-line.error {
+            text-decoration: wavy underline var(--vscode-editorError-foreground);
+            text-decoration-skip-ink: none;
+        }
+        .error-marker {
+            position: absolute;
+            left: -1em;
+            color: var(--vscode-editorError-foreground);
+            font-weight: bold;
+        }
+        .yaml-files {
+            padding: 8px 12px;
+            font-size: 0.9em;
+            background-color: var(--vscode-editor-background);
+            border-bottom: 1px solid var(--vscode-panel-border);
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .yaml-files-title {
+            color: var(--vscode-descriptionForeground);
+            font-size: 0.9em;
+            margin-bottom: 4px;
+        }
+        .yaml-file {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--vscode-editor-foreground);
+        }
+        .yaml-file-icon {
+            color: var(--vscode-symbolIcon-yamlForeground);
+        }
+    </style>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/vs2015.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/json.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/yaml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/csharp.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/xml.min.js"></script>
+    <script>
+        const vscode = acquireVsCodeApi();
+        document.addEventListener('DOMContentLoaded', function() {
+            const yamlBtn = document.getElementById('yaml-path-btn');
+            const langBtn = document.getElementById('language-selector-btn');
+            const changeEnvBtn = document.getElementById('change-env-btn');
+            
+            if (yamlBtn) {
+                yamlBtn.addEventListener('click', function() {
+                    vscode.postMessage({ 
+                        command: 'executeCommand',
+                        commandId: 'j2magicwand.setYamlPath'
+                    });
+                });
+            }
+            
+            if (langBtn) {
+                langBtn.addEventListener('click', function() {
+                    vscode.postMessage({ 
+                        command: 'executeCommand',
+                        commandId: 'j2magicwand.changeRenderLanguage'
+                    });
+                });
+            }
+            if (changeEnvBtn) {
+                changeEnvBtn.addEventListener('click', function() {
+                    vscode.postMessage({
+                        command: 'changeEnvironment'
+                    });
+                });
+            }
+        });
+    </script>
+</head>
+<body>
+    <div class="yaml-files">
+        <div class="yaml-files-title">Loaded YAML Files:</div>
+        {{yamlFilesHtml}}
+    </div>
+    <div class="syntax-status {{syntaxClass}}">
+        <span class="validation-message">{{validationMessage}}</span>
+        <div class="button-group">
+            <button id="yaml-path-btn">YAML Paths</button>
+            <button id="language-selector-btn">Change Language</button>
+            <button id="change-env-btn">Change Environment</button>
+        </div>
+    </div>
+    <div class="code-table">
+        <div class="line-numbers-col">
+            {{lineNumbersHtml}}
+        </div>
+        <div class="code-lines-col">
+            {{codeLinesHtml}}
+        </div>
+    </div>
+    <script>
+        document.addEventListener('DOMContentLoaded', (event) => {
+            document.querySelectorAll('.code-line').forEach((block) => {
+                hljs.highlightBlock(block);
+            });
+        });
+    </script>
+    {{extraScripts}}
+</body>
+</html>

@@ -6,11 +6,18 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as yaml from 'js-yaml';
+import * as path from 'path';
 import { logger } from './utils';
 
 export class J2RenderView {
     private panel: vscode.WebviewPanel | undefined;
     private currentLanguage = 'json';
+    private context: vscode.ExtensionContext;
+    public lastJ2DocumentUri: vscode.Uri | undefined;
+
+    constructor(context: vscode.ExtensionContext) {
+        this.context = context;
+    }
 
     /**
      * Shows or reveals the render view for a given document.
@@ -87,13 +94,88 @@ export class J2RenderView {
                 }
             }
         });
+
+        // In the constructor or showRenderView, add this to handle messages from the webview
+        this.panel.webview.onDidReceiveMessage(async (message) => {
+            if (message.command === 'executeCommand') {
+                if (message.commandId === 'j2magicwand.setYamlPath') {
+                    await vscode.commands.executeCommand('j2magicwand.setYamlPath');
+                } else if (message.commandId === 'j2magicwand.changeRenderLanguage') {
+                    await vscode.commands.executeCommand('j2magicwand.changeRenderLanguage');
+                } else {
+                    vscode.window.showWarningMessage(`Unknown commandId sent from webview: ${message.commandId}`);
+                }
+            } else if (message.command === 'changeEnvironment') {
+                // Get current service name
+                let serviceName = '';
+                if (this.context.globalState) {
+                    serviceName = this.context.globalState.get('j2magicwand.lastService', '');
+                }
+                if (!serviceName) {
+                    const editor = vscode.window.activeTextEditor;
+                    if (editor) {
+                        const filePath = editor.document.uri.fsPath;
+                        serviceName = path.basename(path.dirname(filePath));
+                    }
+                }
+                // Load all saved configs
+                const globalStoragePath = this.context.globalStorageUri.fsPath;
+                const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
+                let environments: string[] = [];
+                let allConfigs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }> = [];
+                if (fs.existsSync(saveFile)) {
+                    try {
+                        allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+                        environments = allConfigs
+                            .filter((c: { serviceName: string; environment: string }) => c.serviceName === serviceName)
+                            .map((c: { serviceName: string; environment: string }) => c.environment);
+                    } catch {}
+                }
+                if (environments.length === 0) {
+                    vscode.window.showWarningMessage('No saved environments found for this service.');
+                    return;
+                }
+                const selected = await vscode.window.showQuickPick(environments, {
+                    placeHolder: 'Select environment',
+                    canPickMany: false
+                });
+                if (selected) {
+                    await this.context.globalState.update('j2magicwand.lastEnvironment', selected);
+                    // Load the YAML config for this service/environment
+                    const configForEnv = allConfigs.find((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+                        c.serviceName === serviceName && c.environment === selected);
+                    if (configForEnv) {
+                        const config = vscode.workspace.getConfiguration('j2magicwand');
+                        await config.update('yamlPaths', configForEnv.yamlPaths, true);
+                        vscode.window.showInformationMessage('Loaded YAML paths: ' + configForEnv.yamlPaths.join(', '));
+                        // Force diagnostics update for all open J2 documents
+                        await vscode.commands.executeCommand('j2magicwand.forceDiagnostics');
+                    } else {
+                        vscode.window.showWarningMessage('No YAML config found for this service/environment.');
+                    }
+                    // Refresh the webview with the active J2 document or last used J2 document
+                    if (this.panel) {
+                        let doc: vscode.TextDocument | undefined;
+                        if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'j2') {
+                            doc = vscode.window.activeTextEditor.document;
+                        } else if (this.lastJ2DocumentUri) {
+                            doc = await vscode.workspace.openTextDocument(this.lastJ2DocumentUri);
+                        }
+                        if (doc) {
+                            this.updateRenderView(doc);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /**
      * Updates the webview content with the latest rendered output.
      * @param document The J2 template document.
      */
-    private updateRenderView(document: vscode.TextDocument): void {
+    public updateRenderView(document: vscode.TextDocument): void {
+        this.lastJ2DocumentUri = document.uri;
         if (!this.panel) {
             return;
         }
@@ -266,123 +348,57 @@ export class J2RenderView {
             return `<span class='code-line ${hasError ? 'error' : ''}'>${this.escapeHtml(line) || '&nbsp;'}</span>`;
         }).join('\n');
 
-        return `<!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <style>
-                body {
-                    font-family: var(--vscode-font-family);
-                    padding: 20px;
-                    color: var(--vscode-editor-foreground);
-                    background-color: var(--vscode-editor-background);
-                }
-                .syntax-status {
-                    margin-bottom: 6px;
-                    padding: 6px 8px;
-                    border-radius: 4px;
-                    font-size: 0.95em;
-                }
-                .syntax-valid {
-                    background-color: var(--vscode-testing-iconPassed);
-                    color: var(--vscode-editor-background);
-                }
-                .syntax-invalid {
-                    background-color: var(--vscode-editorError-background, #ff2d2d);
-                    color: #fff !important;
-                    border: 1.5px solid var(--vscode-editorError-foreground, #fff);
-                    font-weight: bold;
-                }
-                .code-table {
-                    display: flex;
-                    flex-direction: row;
-                    max-width: 100%;
-                    overflow-x: auto;
-                    background: var(--vscode-editor-background);
-                    border-radius: 4px;
-                }
-                .line-numbers-col {
-                    display: flex;
-                    flex-direction: column;
-                    align-items: flex-end;
-                    background: var(--vscode-editorLineNumber-background, #23272e);
-                    border-right: 1px solid var(--vscode-editorLineNumber-activeForeground);
-                    user-select: none;
-                }
-                .line-number {
-                    display: block;
-                    width: 2.5em;
-                    text-align: right;
-                    color: var(--vscode-editorLineNumber-foreground);
-                    font-variant-numeric: tabular-nums;
-                    height: 1.5em;
-                    line-height: 1.5em;
-                    font-size: var(--vscode-editor-font-size);
-                    font-family: var(--vscode-editor-font-family);
-                    vertical-align: top;
-                    margin: 0;
-                    padding: 0;
-                }
-                .line-number.error {
-                    color: var(--vscode-editorError-foreground);
-                }
-                .code-lines-col {
-                    display: flex;
-                    flex-direction: column;
-                    flex: 1;
-                }
-                .code-line {
-                    display: block;
-                    font-family: var(--vscode-editor-font-family);
-                    font-size: var(--vscode-editor-font-size);
-                    white-space: pre;
-                    height: 1.5em;
-                    line-height: 1.5em;
-                    vertical-align: top;
-                    margin: 0;
-                    padding: 0;
-                    position: relative;
-                }
-                .code-line.error {
-                    text-decoration: wavy underline var(--vscode-editorError-foreground);
-                    text-decoration-skip-ink: none;
-                }
-                .error-marker {
-                    position: absolute;
-                    left: -1em;
-                    color: var(--vscode-editorError-foreground);
-                    font-weight: bold;
-                }
-            </style>
-            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/vs2015.min.css">
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/json.min.js"></script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/yaml.min.js"></script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/csharp.min.js"></script>
-            <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/languages/xml.min.js"></script>
-        </head>
-        <body>
-            <div class="syntax-status ${isValid ? 'syntax-valid' : 'syntax-invalid'}">
-                ${validationMessage}
+        // Get YAML files list and current service/environment
+        const config = vscode.workspace.getConfiguration('j2magicwand');
+        const yamlPaths = config.get('yamlPaths', []) as string[];
+        // Get service name and environment from globalState if available
+        let serviceName = '';
+        let environment = '';
+        if (this.context.globalState) {
+            serviceName = this.context.globalState.get('j2magicwand.lastService', '');
+            environment = this.context.globalState.get('j2magicwand.lastEnvironment', '');
+        }
+        // Fallbacks if not set
+        if (!serviceName) {
+            serviceName = 'unknown';
+        }
+        if (!environment) {
+            environment = 'local';
+        }
+        // Check if there is a saved config for this service/environment
+        const globalStoragePath = this.context.globalStorageUri.fsPath;
+        const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
+        let hasConfig = false;
+        if (fs.existsSync(saveFile)) {
+            try {
+                const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+                hasConfig = allConfigs.some((c: { serviceName: string; environment: string }) =>
+                    c.serviceName === serviceName && c.environment === environment);
+            } catch {}
+        }
+        if (!hasConfig) {
+            serviceName = 'unknown';
+        }
+        const serviceEnvHtml = `<div class="service-env-bar"><b>Service:</b> ${this.escapeHtml(serviceName)} &nbsp; <b>Environment:</b> ${this.escapeHtml(environment)}</div>`;
+        const yamlFilesHtml = yamlPaths.map(path => `
+            <div class="yaml-file">
+                <span class="yaml-file-icon">-</span>
+                <span>${this.escapeHtml(path)}</span>
             </div>
-            <div class="code-table">
-                <div class="line-numbers-col">
-                    ${lineNumbersHtml}
-                </div>
-                <div class="code-lines-col">
-                    ${codeLinesHtml}
-                </div>
-            </div>
-            <script>
-                document.addEventListener('DOMContentLoaded', (event) => {
-                    document.querySelectorAll('.code-line').forEach((block) => {
-                        hljs.highlightBlock(block);
-                    });
-                });
-            </script>
-        </body>
-        </html>`;
+        `).join('') || '<div class="yaml-file">No YAML files configured</div>';
+
+        // Load the HTML template
+        const templatePath = this.context.asAbsolutePath('src/webviewTemplate.html');
+        let html = fs.readFileSync(templatePath, 'utf8');
+
+        // Replace placeholders
+        html = html.replace('{{syntaxClass}}', isValid ? 'syntax-valid' : 'syntax-invalid')
+                   .replace('{{validationMessage}}', validationMessage)
+                   .replace('{{lineNumbersHtml}}', lineNumbersHtml)
+                   .replace('{{codeLinesHtml}}', codeLinesHtml)
+                   .replace('{{yamlFilesHtml}}', serviceEnvHtml + yamlFilesHtml);
+
+        return html;
     }
 
     /**
