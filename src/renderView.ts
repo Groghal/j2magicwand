@@ -388,7 +388,7 @@ export class J2RenderView {
         `).join('') || '<div class="yaml-file">No YAML files configured</div>';
 
         // Load the HTML template
-        const templatePath = this.context.asAbsolutePath('src/webviewTemplate.html');
+        const templatePath = this.context.asAbsolutePath('media/webviewTemplate.html');
         let html = fs.readFileSync(templatePath, 'utf8');
 
         // Replace placeholders

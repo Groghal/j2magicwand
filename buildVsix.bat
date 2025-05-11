@@ -1,1 +1,1 @@
-vsce pack
+npx vsce pack
