@@ -27,7 +27,7 @@ export class J2RenderView {
         this.currentLanguage = language;
         if (this.panel) {
             this.panel.title = `Rendered Template (${this.currentLanguage.toUpperCase()})`;
-            
+
             // If we have an active document, update the view
             if (this.lastJ2DocumentUri) {
                 vscode.workspace.openTextDocument(this.lastJ2DocumentUri).then(document => {
@@ -108,24 +108,37 @@ export class J2RenderView {
                     serviceName = this.context.globalState.get('j2magicwand.lastService', '');
                 }
                 if (!serviceName) {
+                    // Try to get service name from active editor or the last J2 document
                     const editor = vscode.window.activeTextEditor;
-                    if (editor) {
-                        const filePath = editor.document.uri.fsPath;
-                        serviceName = path.basename(path.dirname(filePath));
+                    if (editor && editor.document.uri.fsPath) {
+                        serviceName = path.basename(path.dirname(editor.document.uri.fsPath));
+                    } else if (this.lastJ2DocumentUri && this.lastJ2DocumentUri.fsPath) {
+                        serviceName = path.basename(path.dirname(this.lastJ2DocumentUri.fsPath));
+                    } else {
+                        serviceName = 'default';
+                        vscode.window.showWarningMessage('Could not determine service name from file path. Using "default".');
                     }
                 }
                 // Load all saved configs
-                const globalStoragePath = this.context.globalStorageUri.fsPath;
-                const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
+                const saveFile = vscode.Uri.joinPath(this.context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
+
                 let environments: string[] = [];
                 let allConfigs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }> = [];
                 if (fs.existsSync(saveFile)) {
                     try {
                         allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+
+                        // Case-insensitive comparison to make it more forgiving
                         environments = allConfigs
-                            .filter((c: { serviceName: string; environment: string }) => c.serviceName === serviceName)
+                            .filter((c: { serviceName: string; environment: string }) =>
+                                c.serviceName.toLowerCase() === serviceName.toLowerCase())
                             .map((c: { serviceName: string; environment: string }) => c.environment);
-                    } catch {}
+
+                    } catch (error) {
+                        console.error('Error parsing config file:', error);
+                    }
+                } else {
+                    console.log(`Config file not found at: ${saveFile}`);
                 }
                 if (environments.length === 0) {
                     vscode.window.showWarningMessage('No saved environments found for this service.');
@@ -138,8 +151,9 @@ export class J2RenderView {
                 if (selected) {
                     await this.context.globalState.update('j2magicwand.lastEnvironment', selected);
                     // Load the YAML config for this service/environment
-                    const configForEnv = allConfigs.find((c: { serviceName: string; environment: string; yamlPaths: string[] }) => 
-                        c.serviceName === serviceName && c.environment === selected);
+                    const configForEnv = allConfigs.find((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+                        c.serviceName.toLowerCase() === serviceName.toLowerCase() &&
+                        c.environment.toLowerCase() === selected.toLowerCase());
                     if (configForEnv) {
                         const config = vscode.workspace.getConfiguration('j2magicwand');
                         await config.update('yamlPaths', configForEnv.yamlPaths, true);
@@ -362,28 +376,50 @@ export class J2RenderView {
             serviceName = this.context.globalState.get('j2magicwand.lastService', '');
             environment = this.context.globalState.get('j2magicwand.lastEnvironment', '');
         }
+
         // Fallbacks if not set
         if (!serviceName) {
-            serviceName = 'unknown';
+            // Try to get service name from current document path
+            if (document && document.uri && document.uri.fsPath) {
+                serviceName = path.basename(path.dirname(document.uri.fsPath));
+            } else {
+                serviceName = 'unknown';
+            }
         }
+
         if (!environment) {
             environment = 'local';
         }
+
         // Check if there is a saved config for this service/environment
-        const globalStoragePath = this.context.globalStorageUri.fsPath;
-        const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
+        const saveFile = vscode.Uri.joinPath(this.context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
         let hasConfig = false;
         if (fs.existsSync(saveFile)) {
             try {
                 const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+                // Case-insensitive comparison to make it more forgiving
                 hasConfig = allConfigs.some((c: { serviceName: string; environment: string }) =>
-                    c.serviceName === serviceName && c.environment === environment);
-            } catch {}
+                    c.serviceName.toLowerCase() === serviceName.toLowerCase() &&
+                    c.environment.toLowerCase() === environment.toLowerCase());
+            } catch (error) {
+                console.error('Error checking config:', error);
+            }
         }
-        if (!hasConfig) {
-            serviceName = 'unknown';
-        }
-        const serviceEnvHtml = `<div class="service-env-bar"><b>Service:</b> ${this.escapeHtml(serviceName)} &nbsp; <b>Environment:</b> ${this.escapeHtml(environment)}</div>`;
+
+        // Display warning sign if no config exists for this service/environment
+        const serviceDisplay = hasConfig ? serviceName : `${serviceName} ⚠️`;
+
+        const serviceEnvHtml = `
+            <div class="service-env-bar">
+                <b>Service:</b> ${this.escapeHtml(serviceDisplay)} &nbsp; 
+                <b>Environment:</b> ${this.escapeHtml(environment)}
+                ${!hasConfig ? `
+                <div style="margin-top: 5px; color: #f97583; font-size: 12px;">
+                    No saved configuration found for this service/environment combination.
+                    <br>Use the J2 Service or J2 YAML Paths buttons in the status bar to configure.
+                </div>` : ''}
+            </div>`;
+
         const yamlFilesHtml = yamlPaths.map(path => `
             <div class="yaml-file">
                 <span class="yaml-file-icon">-</span>

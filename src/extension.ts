@@ -50,23 +50,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			const config = vscode.workspace.getConfiguration('j2magicwand');
 			let currentPaths = config.get('yamlPaths', []) as string[];
 			const environments = ['local', 'dev', 'test', 'lt', 'preprod', 'prod'];
-			const globalStoragePath = vscode.extensions.getExtension('j2magicwand.j2magicwand')?.extensionPath || '';
-			const saveFile = path.join(globalStoragePath, 'j2magicwand-yaml-configs.json');
+			const saveFile = vscode.Uri.joinPath(context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
 
 			// Helper to get default service name
 			function getDefaultServiceName(): string {
+				let serviceName = context.globalState.get('j2magicwand.lastService', '');
+				if (serviceName) {
+					return serviceName;
+				}
+
 				// Try to use the last J2 document from renderView
 				if (renderView && renderView.lastJ2DocumentUri) {
 					const filePath = renderView.lastJ2DocumentUri.fsPath;
-					return path.basename(path.dirname(filePath));
+					serviceName = path.basename(path.dirname(filePath));
+					return serviceName;
 				}
+
 				// Fallback to active editor
 				const editor = vscode.window.activeTextEditor;
 				if (editor && editor.document.languageId === 'j2') {
 					const filePath = editor.document.uri.fsPath;
-					return path.basename(path.dirname(filePath));
+					serviceName = path.basename(path.dirname(filePath));
+					return serviceName;
 				}
-				return 'service';
+
+				return 'default';
 			}
 
 			// Helper to load all saved configs
@@ -83,6 +91,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			// Helper to save all configs
 			function saveAllConfigs(configs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }>): void {
+				fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
 				fs.writeFileSync(saveFile, JSON.stringify(configs, null, 2));
 			}
 
@@ -331,6 +340,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			renderView.showRenderView(editor.document);
 		}),
 
+		// Command to handle multiple variables on a line
+		vscode.commands.registerCommand('j2magicwand.showVariableQuickPick', async (variables: string[]) => {
+			const selected = await vscode.window.showQuickPick(variables, {
+				placeHolder: 'Select variable to go to definition'
+			});
+
+			if (selected) {
+				vscode.commands.executeCommand('j2magicwand.goToDefinition', selected);
+			}
+		}),
+
 		// Command to change render language
 		vscode.commands.registerCommand('j2magicwand.changeRenderLanguage', async () => {
 			const languages = [
@@ -346,6 +366,154 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			if (selected && renderView) {
 				renderView.changeLanguage(selected.value);
+			}
+		}),
+
+		// Command to view and change current service name
+		vscode.commands.registerCommand('j2magicwand.manageService', async () => {
+			const currentService = context.globalState.get('j2magicwand.lastService', '');
+
+			// Get all services from saved configs
+			const saveFile = vscode.Uri.joinPath(context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
+			let services: string[] = [];
+
+			if (fs.existsSync(saveFile)) {
+				try {
+					const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8')) as Array<{ serviceName: string; environment: string; yamlPaths: string[] }>;
+					// Get unique service names
+					services = [...new Set(allConfigs.map(c => c.serviceName))];
+				} catch {}
+			}
+
+			// Add options to list
+			const items: vscode.QuickPickItem[] = [
+				{
+					label: `$(pencil) Set Service Name`,
+					description: currentService ? `Current: ${currentService}` : 'No service name set'
+				},
+				{
+					label: `$(list-tree) Show All Saved Configurations`,
+					description: "List all services and environments"
+				}
+			];
+
+			// Add existing services if available
+			if (services.length > 0) {
+				items.push({ label: 'Switch to existing service:', kind: vscode.QuickPickItemKind.Separator });
+				services.forEach(service => {
+					items.push({
+						label: service,
+						description: service === currentService ? 'Current' : '',
+						picked: service === currentService
+					});
+				});
+			}
+
+			const selected = await vscode.window.showQuickPick(items, {
+				placeHolder: 'Manage service settings'
+			});
+
+			if (!selected) {
+				return;
+			}
+
+			if (selected.label === `$(list-tree) Show All Saved Configurations`) {
+				// Show all configurations
+				if (fs.existsSync(saveFile)) {
+					try {
+						const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8')) as Array<{ serviceName: string; environment: string; yamlPaths: string[] }>;
+						if (allConfigs.length === 0) {
+							vscode.window.showInformationMessage("No saved configurations found.");
+							return;
+						}
+
+						// Group by service name
+						const groupedConfigs = new Map<string, Array<string>>();
+						allConfigs.forEach(config => {
+							if (!groupedConfigs.has(config.serviceName)) {
+								groupedConfigs.set(config.serviceName, []);
+							}
+							groupedConfigs.get(config.serviceName)?.push(config.environment);
+						});
+
+						// Create markdown content for the webview
+						let content = "# Saved Service Configurations\n\n";
+						groupedConfigs.forEach((environments, service) => {
+							content += `## Service: ${service}\n\n`;
+							content += "Environments:\n";
+							environments.forEach(env => {
+								content += `- ${env}\n`;
+							});
+							content += "\n";
+						});
+
+						// Create and show the webview
+						const panel = vscode.window.createWebviewPanel(
+							'j2magicwand.configList',
+							'J2 Magic Wand Configurations',
+							vscode.ViewColumn.One,
+							{}
+						);
+
+						panel.webview.html = `
+							<!DOCTYPE html>
+							<html lang="en">
+							<head>
+								<meta charset="UTF-8">
+								<meta name="viewport" content="width=device-width, initial-scale=1.0">
+								<title>J2 Magic Wand Configurations</title>
+								<style>
+									body { font-family: var(--vscode-font-family); padding: 10px; }
+									h1 { color: var(--vscode-editor-foreground); }
+									h2 { color: var(--vscode-textLink-foreground); }
+									ul { padding-left: 20px; }
+								</style>
+							</head>
+							<body>
+								${content.replace(/\n/g, '<br>')}
+							</body>
+							</html>
+						`;
+					} catch (error) {
+						vscode.window.showErrorMessage(`Error reading configurations: ${error}`);
+					}
+				} else {
+					vscode.window.showInformationMessage("No saved configurations file found.");
+				}
+				return;
+			}
+
+			if (selected.label === `$(pencil) Set Service Name`) {
+				const defaultValue = currentService || (renderView && renderView.lastJ2DocumentUri ?
+					path.basename(path.dirname(renderView.lastJ2DocumentUri.fsPath)) : 'default');
+
+				const serviceName = await vscode.window.showInputBox({
+					prompt: 'Enter service name',
+					value: defaultValue
+				});
+
+				if (serviceName) {
+					await context.globalState.update('j2magicwand.lastService', serviceName);
+					vscode.window.showInformationMessage(`Service name set to: ${serviceName}`);
+
+					// Refresh any open views
+					if (renderView && renderView.lastJ2DocumentUri) {
+						vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+							renderView.updateRenderView(doc);
+						});
+					}
+				}
+			} else if (services.includes(selected.label)) {
+				// User selected an existing service
+				await context.globalState.update('j2magicwand.lastService', selected.label);
+				vscode.window.showInformationMessage(`Switched to service: ${selected.label}`);
+
+				// Refresh any open views
+				if (renderView && renderView.lastJ2DocumentUri) {
+					vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+						renderView.updateRenderView(doc);
+					});
+				}
 			}
 		}),
 
@@ -395,6 +563,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	yamlPathButton.tooltip = "Set YAML Paths";
 	yamlPathButton.command = 'j2magicwand.setYamlPath';
 	statusBarItems.push(yamlPathButton);
+
+	const serviceButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
+	serviceButton.text = "$(server) J2 Service";
+	serviceButton.tooltip = "Manage Current Service";
+	serviceButton.command = 'j2magicwand.manageService';
+	statusBarItems.push(serviceButton);
 
 	const codeLensButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
 	codeLensButton.text = "$(symbol-color) J2 CodeLens";
@@ -450,14 +624,30 @@ export function deactivate(): void {
  */
 async function checkForVsixUpdate(): Promise<void> {
 	const scanFolder = getConfig('vsixScanFolder', 'c:\\soft\\.dotnet-tools');
-	let files: string[] = [];
-	try {
-		files = fs.readdirSync(scanFolder);
-	} catch (e) {
-		return;
+
+	// Helper to recursively collect all .vsix files
+	function getAllVsixFiles(dir: string): string[] {
+		let results: string[] = [];
+		try {
+			const list = fs.readdirSync(dir);
+			for (const file of list) {
+				const filePath = path.join(dir, file);
+				const stat = fs.statSync(filePath);
+				if (stat && stat.isDirectory()) {
+					results = results.concat(getAllVsixFiles(filePath));
+				} else if (filePath.toLowerCase().endsWith('.vsix')) {
+					results.push(filePath);
+				}
+			}
+		} catch (e) {
+			// Ignore errors
+		}
+		return results;
 	}
-	const vsixFiles = files
-		.map(f => ({ file: f, version: parseVsixVersion(f) }))
+
+	const vsixFilePaths: string[] = getAllVsixFiles(scanFolder);
+	const vsixFiles = vsixFilePaths
+		.map(f => ({ file: f, version: parseVsixVersion(path.basename(f)) }))
 		.filter(f => f.version)
 		.sort((a, b) => compareVersions(b.version!, a.version!));
 
@@ -468,7 +658,7 @@ async function checkForVsixUpdate(): Promise<void> {
 	const installedVersion = ext?.packageJSON.version;
 
 	if (installedVersion && compareVersions(latest.version!, installedVersion) > 0) {
-		const fullPath = path.join(scanFolder, latest.file);
+		const fullPath = latest.file;
 		const result = await vscode.window.showInformationMessage(
 			`A newer version (${latest.version}) of J2 Magic Wand is available. Update now?`,
 			'Update'

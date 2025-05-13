@@ -39,6 +39,9 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
         const config = vscode.workspace.getConfiguration('j2magicwand');
         const customTitle = config.get('codeLensTitle', 'To YAML!!!');
 
+        // Group placeholders by line number
+        const placeholdersByLine = new Map<number, Array<{variable: string, range: vscode.Range}>>();
+
         while ((match = placeholderRegex.exec(text)) !== null) {
             const variable = match[1].trim();
             if (!variable.includes(' ')) { // Only add CodeLens for valid placeholders
@@ -46,15 +49,52 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
                     document.positionAt(match.index),
                     document.positionAt(match.index + match[0].length)
                 );
+                const line = range.start.line;
 
-                // Replace {variable} in the title with the actual variable name
-                const title = customTitle.replace('{variable}', variable);
+                if (!placeholdersByLine.has(line)) {
+                    placeholdersByLine.set(line, []);
+                }
+                placeholdersByLine.get(line)?.push({ variable, range });
+            }
+        }
 
-                const codeLens = new vscode.CodeLens(range, {
+        // Create CodeLenses based on the number of placeholders per line
+        for (const [line, placeholders] of placeholdersByLine) {
+            if (placeholders.length === 1) {
+                // Single placeholder on line - show just icon + generic text (no variable name)
+                const { variable, range } = placeholders[0];
+                // Remove {variable} from the custom title
+                let title = customTitle.replace('{variable}', '').replace(/\s+$/, '');
+                // If the title is now empty, fallback to a default
+                if (!title.trim()) {title = '$(rocket)';}
+                codeLenses.push(new vscode.CodeLens(range, {
                     title: title,
                     command: 'j2magicwand.goToDefinition',
                     arguments: [variable]
+                }));
+            } else {
+                // Multiple placeholders on line - show compact format
+                const lineRange = new vscode.Range(
+                    new vscode.Position(line, 0),
+                    new vscode.Position(line, 0)
+                );
+
+                // Create a single CodeLens for the line with all variables
+                const variables = placeholders.map(p => p.variable).join(', ');
+                const title = `$(symbol-variable) ${variables}`;
+
+                const codeLens = new vscode.CodeLens(lineRange, {
+                    title: title,
+                    command: 'j2magicwand.goToDefinition',
+                    arguments: [placeholders[0].variable] // Default to first variable
                 });
+
+                // Add additional commands for other variables
+                codeLens.command = {
+                    title: title,
+                    command: 'j2magicwand.showVariableQuickPick',
+                    arguments: [placeholders.map(p => p.variable)]
+                };
 
                 codeLenses.push(codeLens);
             }
