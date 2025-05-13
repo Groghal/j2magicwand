@@ -20,6 +20,24 @@ export class J2RenderView {
     }
 
     /**
+     * Changes the syntax highlighting language for the rendered template
+     * @param language The language to switch to
+     */
+    public changeLanguage(language: string): void {
+        this.currentLanguage = language;
+        if (this.panel) {
+            this.panel.title = `Rendered Template (${this.currentLanguage.toUpperCase()})`;
+            
+            // If we have an active document, update the view
+            if (this.lastJ2DocumentUri) {
+                vscode.workspace.openTextDocument(this.lastJ2DocumentUri).then(document => {
+                    this.updateRenderView(document);
+                });
+            }
+        }
+    }
+
+    /**
      * Shows or reveals the render view for a given document.
      * @param document The J2 template document to render.
      */
@@ -66,36 +84,14 @@ export class J2RenderView {
             }
         });
 
-        this.panel.onDidDispose(() => {
-            templateChangeDisposable.dispose();
-            yamlChangeDisposable.dispose();
-            configChangeDisposable.dispose();
-            this.panel = undefined;
-        });
-
-        // Register command for changing render language
-        vscode.commands.registerCommand('j2magicwand.changeRenderLanguage', async () => {
-            const languages = [
-                { label: 'JSON', value: 'json' },
-                { label: 'YAML', value: 'yaml' },
-                { label: 'C#', value: 'csharp' },
-                { label: 'XML', value: 'xml' }
-            ];
-
-            const selected = await vscode.window.showQuickPick(languages, {
-                placeHolder: 'Select language for syntax highlighting'
-            });
-
-            if (selected) {
-                this.currentLanguage = selected.value;
-                if (this.panel) {
-                    this.panel.title = `Rendered Template (${this.currentLanguage.toUpperCase()})`;
-                    this.updateRenderView(document);
-                }
+        // Update render view when active editor changes
+        const activeEditorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
+            if (editor && editor.document.languageId === 'j2') {
+                this.updateRenderView(editor.document);
             }
         });
 
-        // In the constructor or showRenderView, add this to handle messages from the webview
+        // Handle messages from the webview
         this.panel.webview.onDidReceiveMessage(async (message) => {
             if (message.command === 'executeCommand') {
                 if (message.commandId === 'j2magicwand.setYamlPath') {
@@ -142,7 +138,7 @@ export class J2RenderView {
                 if (selected) {
                     await this.context.globalState.update('j2magicwand.lastEnvironment', selected);
                     // Load the YAML config for this service/environment
-                    const configForEnv = allConfigs.find((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+                    const configForEnv = allConfigs.find((c: { serviceName: string; environment: string; yamlPaths: string[] }) => 
                         c.serviceName === serviceName && c.environment === selected);
                     if (configForEnv) {
                         const config = vscode.workspace.getConfiguration('j2magicwand');
@@ -167,6 +163,14 @@ export class J2RenderView {
                     }
                 }
             }
+        });
+
+        this.panel.onDidDispose(() => {
+            templateChangeDisposable.dispose();
+            yamlChangeDisposable.dispose();
+            configChangeDisposable.dispose();
+            activeEditorChangeDisposable.dispose();
+            this.panel = undefined;
         });
     }
 

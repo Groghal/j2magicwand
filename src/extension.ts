@@ -331,6 +331,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			renderView.showRenderView(editor.document);
 		}),
 
+		// Command to change render language
+		vscode.commands.registerCommand('j2magicwand.changeRenderLanguage', async () => {
+			const languages = [
+				{ label: 'JSON', value: 'json' },
+				{ label: 'YAML', value: 'yaml' },
+				{ label: 'C#', value: 'csharp' },
+				{ label: 'XML', value: 'xml' }
+			];
+
+			const selected = await vscode.window.showQuickPick(languages, {
+				placeHolder: 'Select language for syntax highlighting'
+			});
+
+			if (selected && renderView) {
+				renderView.changeLanguage(selected.value);
+			}
+		}),
+
 		// Register a command to force diagnostics update for all open J2 documents
 		vscode.commands.registerCommand('j2magicwand.forceDiagnostics', () => {
 			vscode.workspace.textDocuments.forEach(doc => {
