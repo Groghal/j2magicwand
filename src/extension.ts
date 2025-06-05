@@ -3,8 +3,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as yaml from 'js-yaml';
-import { logger, parseVsixVersion, compareVersions, getConfig, isJ2Template } from './utils';
+import { logger, parseVsixVersion, compareVersions, getConfig, isJ2Template, debounce, withTimeout } from './utils';
+import { safeParseYaml, safeParseJson } from './parsing';
 import { J2Diagnostics } from './diagnostics';
 import { J2PlaceholderProvider } from './placeholderProvider';
 import { J2RenderView } from './renderView';
@@ -33,15 +33,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	placeholderProvider = new J2PlaceholderProvider();
 	renderView = new J2RenderView(context);
 
-	// Check for VSIX updates in the configured folder
-	checkForVsixUpdate();
+	// Check for VSIX updates in the configured folder (non-blocking)
+	checkForVsixUpdate().catch((error: unknown) => {
+		logger.error('Failed to check for VSIX updates:', error);
+	});
 
 	// On activation, update diagnostics for all already-open J2 documents
-	for (const document of vscode.workspace.textDocuments) {
+	// Process documents in parallel for better performance
+	logger.info(`Checking ${vscode.workspace.textDocuments.length} open documents for J2 templates`);
+	const diagnosticPromises = vscode.workspace.textDocuments.map(async document => {
 		if (await isJ2Template(document)) {
+			logger.info(`Initializing diagnostics for ${document.uri.fsPath}`);
 			diagnostics.updateDiagnostics(document);
 		}
-	}
+	});
+	await Promise.allSettled(diagnosticPromises);
 
 	// Register all extension commands
 	context.subscriptions.push(
@@ -54,7 +60,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			// Helper to get default service name
 			function getDefaultServiceName(): string {
-				let serviceName = context.globalState.get('j2magicwand.lastService', '');
+				let serviceName = context.globalState.get('j2magicwand.lastService', '') as string || '';
 				if (serviceName) {
 					return serviceName;
 				}
@@ -79,20 +85,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			// Helper to load all saved configs
 			function loadAllConfigs(): Array<{ serviceName: string; environment: string; yamlPaths: string[] }> {
-				if (fs.existsSync(saveFile)) {
-					try {
-						return JSON.parse(fs.readFileSync(saveFile, 'utf8'));
-					} catch {
-						return [];
+				try {
+					if (fs.existsSync(saveFile)) {
+						const data = fs.readFileSync(saveFile, 'utf8');
+						return safeParseJson<Array<{ serviceName: string; environment: string; yamlPaths: string[] }>>(data, 'j2magicwand-yaml-configs.json') || [];
 					}
+				} catch (error: unknown) {
+					logger.error('Failed to load saved configs:', error);
+					vscode.window.showWarningMessage(`Failed to load saved configurations: ${error}`);
 				}
 				return [];
 			}
 
 			// Helper to save all configs
 			function saveAllConfigs(configs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }>): void {
-				fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
-				fs.writeFileSync(saveFile, JSON.stringify(configs, null, 2));
+				try {
+					fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
+					fs.writeFileSync(saveFile, JSON.stringify(configs, null, 2));
+				} catch (error: unknown) {
+					logger.error('Failed to save configs:', error);
+					vscode.window.showErrorMessage(`Failed to save configurations: ${error}`);
+				}
 			}
 
 			// Helper to refresh the webview after yamlPaths changes
@@ -100,6 +113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				const updateAllJ2Diagnostics = (): void => {
 					vscode.workspace.textDocuments.forEach(doc => {
 						if (doc.languageId === 'j2' && diagnostics) {
+							logger.info(`Updating diagnostics for ${doc.uri.fsPath}`);
 							diagnostics.updateDiagnostics(doc);
 						}
 					});
@@ -109,14 +123,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					renderView.updateRenderView(editor.document);
 					updateAllJ2Diagnostics();
 				} else if (renderView && renderView.lastJ2DocumentUri) {
-					vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+					Promise.resolve(vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri)).then(doc => {
 						renderView.updateRenderView(doc);
 						updateAllJ2Diagnostics();
+					}).catch((error: unknown) => {
+						logger.error('Failed to open J2 document:', error);
 					});
 				}
 			}
 
-			while (true) {
+			let continueLoop = true;
+			while (continueLoop) {
 				const fileItems = currentPaths.map((path, idx) => ({
 					label: path,
 					description: [
@@ -130,11 +147,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				fileItems.push({ label: '$(file-add) Choose YAML file', description: '' });
 				fileItems.push({ label: '$(cloud-upload) Save', description: 'Save current YAML config' });
 				fileItems.push({ label: '$(cloud-download) Load', description: 'Load a saved YAML config' });
+				fileItems.push({ label: '$(check) Done', description: 'Exit YAML path configuration' });
 
 				const selected = await vscode.window.showQuickPick(fileItems, {
-					placeHolder: 'Select a YAML file to manage, save, or load'
+					placeHolder: 'Select a YAML file to manage, save, or load (Esc or Done to exit)'
 				});
-				if (!selected) {return;}
+				if (!selected) {
+					continueLoop = false;
+					break;
+				}
+
+				if (selected.label === '$(check) Done') {
+					continueLoop = false;
+					break;
+				}
 
 				if (selected.label === '$(file-add) Choose YAML file') {
 					if (currentPaths.length >= 5) {
@@ -158,58 +184,74 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					}
 				}
 				if (selected.label === '$(cloud-upload) Save') {
-					// Prompt for service name
-					const defaultService = getDefaultServiceName();
-					const serviceName = await vscode.window.showInputBox({
-						prompt: 'Enter service name',
-						value: defaultService
-					}) || defaultService;
-					// Prompt for environment
-					const environment = await vscode.window.showQuickPick(environments, {
-						placeHolder: 'Select environment',
-						canPickMany: false
-					}) || 'test';
-					// Save config
-					const allConfigs = loadAllConfigs();
-					// Remove existing config for this service/env
-					const filtered = allConfigs.filter((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
-						!(c.serviceName === serviceName && c.environment === environment));
-					filtered.push({ serviceName, environment, yamlPaths: currentPaths });
-					saveAllConfigs(filtered);
-					// Store last used environment
-					context.globalState.update('j2magicwand.lastEnvironment', environment);
-					context.globalState.update('j2magicwand.lastService', serviceName);
-					refreshJ2Webview();
+					try {
+						// Prompt for service name
+						const defaultService = getDefaultServiceName();
+						const serviceName = await vscode.window.showInputBox({
+							prompt: 'Enter service name',
+							value: defaultService
+						});
+						if (!serviceName) {
+							continue;
+						}
+						// Prompt for environment
+						const environment = await vscode.window.showQuickPick(environments, {
+							placeHolder: 'Select environment',
+							canPickMany: false
+						});
+						if (!environment) {
+							continue;
+						}
+						// Save config
+						const allConfigs = loadAllConfigs();
+						// Remove existing config for this service/env
+						const filtered = allConfigs.filter((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+							!(c.serviceName === serviceName && c.environment === environment));
+						filtered.push({ serviceName, environment, yamlPaths: currentPaths });
+						saveAllConfigs(filtered);
+						// Store last used environment
+						await context.globalState.update('j2magicwand.lastEnvironment', environment);
+						await context.globalState.update('j2magicwand.lastService', serviceName);
+						refreshJ2Webview();
+						vscode.window.showInformationMessage(`Saved configuration for ${serviceName} (${environment})`);
+					} catch (error: unknown) {
+						vscode.window.showErrorMessage(`Failed to save configuration: ${error}`);
+					}
 					continue;
 				}
 				if (selected.label === '$(cloud-download) Load') {
-					const allConfigs = loadAllConfigs();
-					if (allConfigs.length === 0) {
-						vscode.window.showWarningMessage('No saved YAML configs found.');
-						continue;
-					}
-					// Try to preselect current service/env
-					const defaultService = getDefaultServiceName();
-					const defaultEnv = 'test';
-					const items = allConfigs.map((c: { serviceName: string; environment: string; yamlPaths: string[] }) => ({
-						label: `${c.serviceName} (${c.environment})`,
-						description: c.yamlPaths.join(', '),
-						config: c
-					}));
-					let preselectIdx = items.findIndex(i => i.config.serviceName === defaultService && i.config.environment === defaultEnv);
-					if (preselectIdx === -1) {
-						preselectIdx = 0;
-					}
-					const selectedConfig = await vscode.window.showQuickPick(items, {
-						placeHolder: 'Select a config to load',
-						canPickMany: false
-					});
-					if (selectedConfig) {
-						currentPaths = selectedConfig.config.yamlPaths;
-						await config.update('yamlPaths', currentPaths, true);
-						context.globalState.update('j2magicwand.lastEnvironment', selectedConfig.config.environment);
-						context.globalState.update('j2magicwand.lastService', selectedConfig.config.serviceName);
-						refreshJ2Webview();
+					try {
+						const allConfigs = loadAllConfigs();
+						if (allConfigs.length === 0) {
+							vscode.window.showWarningMessage('No saved YAML configs found.');
+							continue;
+						}
+						// Try to preselect current service/env
+						const defaultService = getDefaultServiceName();
+						const defaultEnv = 'test';
+						const items = allConfigs.map((c: { serviceName: string; environment: string; yamlPaths: string[] }) => ({
+							label: `${c.serviceName} (${c.environment})`,
+							description: c.yamlPaths.join(', '),
+							config: c
+						}));
+						let preselectIdx = items.findIndex(i => i.config.serviceName === defaultService && i.config.environment === defaultEnv);
+						if (preselectIdx === -1) {
+							preselectIdx = 0;
+						}
+						const selectedConfig = await vscode.window.showQuickPick(items, {
+							placeHolder: 'Select a config to load',
+							canPickMany: false
+						});
+						if (selectedConfig) {
+							currentPaths = selectedConfig.config.yamlPaths;
+							await config.update('yamlPaths', currentPaths, true);
+							await context.globalState.update('j2magicwand.lastEnvironment', selectedConfig.config.environment);
+							await context.globalState.update('j2magicwand.lastService', selectedConfig.config.serviceName);
+							refreshJ2Webview();
+							vscode.window.showInformationMessage(`Loaded configuration for ${selectedConfig.config.serviceName} (${selectedConfig.config.environment})`);
+						}
+					} catch (error: unknown) {
+						vscode.window.showErrorMessage(`Failed to load configuration: ${error}`);
 					}
 					continue;
 				}
@@ -250,8 +292,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			for (let i = yamlPaths.length - 1; i >= 0; i--) {
 				const yamlPath = yamlPaths[i];
 				try {
-					const yamlContent = fs.readFileSync(yamlPath, 'utf8');
-					const placeholders = yaml.load(yamlContent) as Record<string, unknown>;
+					if (!fs.existsSync(yamlPath)) {
+						logger.error(`YAML file not found: ${yamlPath}`);
+						continue;
+					}
+					let yamlContent: string;
+					try {
+						yamlContent = fs.readFileSync(yamlPath, 'utf8');
+					} catch (readError) {
+						logger.error(`Failed to read YAML file ${yamlPath}:`, readError);
+						continue;
+					}
+					if (!yamlContent || yamlContent.trim() === '') {
+						logger.error(`YAML file is empty: ${yamlPath}`);
+						continue;
+					}
+					const placeholders = safeParseYaml(yamlContent, yamlPath);
+					if (!placeholders) {
+						continue;
+					}
 
 					if (variable in placeholders) {
 						const doc = await vscode.workspace.openTextDocument(yamlPath);
@@ -272,7 +331,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						}
 						return;
 					}
-				} catch (error) {
+				} catch (error: unknown) {
 					logger.error(`Error reading YAML file ${yamlPath}:`, error);
 				}
 			}
@@ -371,18 +430,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 		// Command to view and change current service name
 		vscode.commands.registerCommand('j2magicwand.manageService', async () => {
-			const currentService = context.globalState.get('j2magicwand.lastService', '');
+			const currentService = context.globalState.get('j2magicwand.lastService', '') as string || '';
 
 			// Get all services from saved configs
 			const saveFile = vscode.Uri.joinPath(context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
 			let services: string[] = [];
 
-			if (fs.existsSync(saveFile)) {
-				try {
-					const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8')) as Array<{ serviceName: string; environment: string; yamlPaths: string[] }>;
+			try {
+				if (fs.existsSync(saveFile)) {
+					const data = fs.readFileSync(saveFile, 'utf8');
+					const allConfigs = safeParseJson<Array<{ serviceName: string; environment: string; yamlPaths: string[] }>>(data, 'j2magicwand-yaml-configs.json') || [];
 					// Get unique service names
 					services = [...new Set(allConfigs.map(c => c.serviceName))];
-				} catch {}
+				}
+			} catch (error: unknown) {
+				logger.error('Failed to load service names:', error);
 			}
 
 			// Add options to list
@@ -419,9 +481,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 			if (selected.label === `$(list-tree) Show All Saved Configurations`) {
 				// Show all configurations
-				if (fs.existsSync(saveFile)) {
-					try {
-						const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8')) as Array<{ serviceName: string; environment: string; yamlPaths: string[] }>;
+				try {
+					if (fs.existsSync(saveFile)) {
+						const data = fs.readFileSync(saveFile, 'utf8');
+						const allConfigs = safeParseJson<Array<{ serviceName: string; environment: string; yamlPaths: string[] }>>(data, 'j2magicwand-yaml-configs.json') || [];
 						if (allConfigs.length === 0) {
 							vscode.window.showInformationMessage("No saved configurations found.");
 							return;
@@ -474,11 +537,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 							</body>
 							</html>
 						`;
-					} catch (error) {
-						vscode.window.showErrorMessage(`Error reading configurations: ${error}`);
+					} else {
+						vscode.window.showInformationMessage("No saved configurations file found.");
 					}
-				} else {
-					vscode.window.showInformationMessage("No saved configurations file found.");
+				} catch (error: unknown) {
+					logger.error('Error reading configurations:', error);
+					vscode.window.showErrorMessage(`Error reading configurations: ${error}`);
 				}
 				return;
 			}
@@ -498,8 +562,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 					// Refresh any open views
 					if (renderView && renderView.lastJ2DocumentUri) {
-						vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+						Promise.resolve(vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri)).then(doc => {
 							renderView.updateRenderView(doc);
+						}).catch((error: unknown) => {
+							logger.error('Failed to refresh view:', error);
 						});
 					}
 				}
@@ -510,8 +576,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 				// Refresh any open views
 				if (renderView && renderView.lastJ2DocumentUri) {
-					vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri).then(doc => {
+					Promise.resolve(vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri)).then(doc => {
 						renderView.updateRenderView(doc);
+					}).catch((error: unknown) => {
+						logger.error('Failed to refresh view:', error);
 					});
 				}
 			}
@@ -524,6 +592,152 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 					diagnostics.updateDiagnostics(doc);
 				}
 			});
+		}),
+
+		// Command to update YAML paths programmatically (for external tools)
+		vscode.commands.registerCommand('j2magicwand.updateYamlPaths', async (yamlPaths: string[] | string) => {
+			try {
+				let paths: string[];
+
+				// Check if it's a file path
+				if (typeof yamlPaths === 'string') {
+					// Could be a JSON file path or a single YAML path
+					if (yamlPaths.endsWith('.json')) {
+						// It's a JSON file, load the array from it
+						if (!fs.existsSync(yamlPaths)) {
+							throw new Error(`JSON file not found: ${yamlPaths}`);
+						}
+						const fileContent = fs.readFileSync(yamlPaths, 'utf8');
+						paths = safeParseJson<string[]>(fileContent, yamlPaths) || [];
+						if (!Array.isArray(paths)) {
+							throw new Error('JSON file must contain an array of strings');
+						}
+					} else {
+						// Treat it as a single YAML path for backward compatibility
+						paths = [yamlPaths];
+					}
+				} else if (Array.isArray(yamlPaths)) {
+					paths = yamlPaths;
+				} else {
+					throw new Error('YAML paths must be an array of strings or a path to a JSON file');
+				}
+
+				const config = vscode.workspace.getConfiguration('j2magicwand');
+				await config.update('yamlPaths', paths, true);
+
+				// Update diagnostics for all open J2 documents
+				vscode.workspace.textDocuments.forEach(doc => {
+					if (doc.languageId === 'j2' && diagnostics) {
+						diagnostics.updateDiagnostics(doc);
+					}
+				});
+
+				// Update render view if open
+				if (renderView && renderView.lastJ2DocumentUri) {
+					Promise.resolve(vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri)).then(doc => {
+						renderView.updateRenderView(doc);
+					}).catch((error: unknown) => {
+						logger.error('Failed to update render view:', error);
+					});
+				}
+
+				logger.info(`YAML paths updated programmatically: ${paths.join(', ')}`);
+				return { success: true, yamlPaths: paths };
+			} catch (error: unknown) {
+				logger.error('Failed to update YAML paths:', error);
+				return { success: false, error: String(error) };
+			}
+		}),
+
+		// Command to set YAML configuration programmatically (for external tools)
+		vscode.commands.registerCommand('j2magicwand.setYamlConfiguration', async (args: { serviceName: string; environment: string; yamlPaths: string[] } | string) => {
+			try {
+				let configData: { serviceName: string; environment: string; yamlPaths: string[] };
+
+				// Check if args is a file path (string)
+				if (typeof args === 'string') {
+					// It's a file path, load the JSON from file
+					if (!fs.existsSync(args)) {
+						throw new Error(`Configuration file not found: ${args}`);
+					}
+					const fileContent = fs.readFileSync(args, 'utf8');
+					configData = safeParseJson<{ serviceName: string; environment: string; yamlPaths: string[] }>(fileContent, args) || {} as any;
+					if (!configData.serviceName || !configData.environment || !configData.yamlPaths) {
+						throw new Error('Invalid configuration file. Must contain serviceName, environment, and yamlPaths');
+					}
+				} else if (args && typeof args === 'object') {
+					// It's a direct configuration object
+					if (typeof args.serviceName !== 'string' || typeof args.environment !== 'string' || !Array.isArray(args.yamlPaths)) {
+						throw new Error('Invalid arguments. Expected: { serviceName: string, environment: string, yamlPaths: string[] }');
+					}
+					configData = args;
+				} else {
+					throw new Error('Invalid arguments. Expected either a file path or configuration object');
+				}
+
+				const saveFile = vscode.Uri.joinPath(context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
+
+				// Helper to load all saved configs
+				function loadAllConfigs(): Array<{ serviceName: string; environment: string; yamlPaths: string[] }> {
+					try {
+						if (fs.existsSync(saveFile)) {
+							const data = fs.readFileSync(saveFile, 'utf8');
+							return safeParseJson<Array<{ serviceName: string; environment: string; yamlPaths: string[] }>>(data, 'j2magicwand-yaml-configs.json') || [];
+						}
+					} catch (error: unknown) {
+						logger.error('Failed to load saved configs:', error);
+					}
+					return [];
+				}
+
+				// Helper to save all configs
+				function saveAllConfigs(configs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }>): void {
+					try {
+						fs.mkdirSync(context.globalStorageUri.fsPath, { recursive: true });
+						fs.writeFileSync(saveFile, JSON.stringify(configs, null, 2));
+					} catch (error: unknown) {
+						logger.error('Failed to save configs:', error);
+						throw error;
+					}
+				}
+
+				// Save the configuration
+				const allConfigs = loadAllConfigs();
+				const filtered = allConfigs.filter((c: { serviceName: string; environment: string; yamlPaths: string[] }) =>
+					!(c.serviceName === configData.serviceName && c.environment === configData.environment));
+				filtered.push({ serviceName: configData.serviceName, environment: configData.environment, yamlPaths: configData.yamlPaths });
+				saveAllConfigs(filtered);
+
+				// Update current YAML paths
+				const config = vscode.workspace.getConfiguration('j2magicwand');
+				await config.update('yamlPaths', configData.yamlPaths, true);
+
+				// Store last used environment and service
+				await context.globalState.update('j2magicwand.lastEnvironment', configData.environment);
+				await context.globalState.update('j2magicwand.lastService', configData.serviceName);
+
+				// Update diagnostics for all open J2 documents
+				vscode.workspace.textDocuments.forEach(doc => {
+					if (doc.languageId === 'j2' && diagnostics) {
+						diagnostics.updateDiagnostics(doc);
+					}
+				});
+
+				// Update render view if open
+				if (renderView && renderView.lastJ2DocumentUri) {
+					Promise.resolve(vscode.workspace.openTextDocument(renderView.lastJ2DocumentUri)).then(doc => {
+						renderView.updateRenderView(doc);
+					}).catch((error: unknown) => {
+						logger.error('Failed to update render view:', error);
+					});
+				}
+
+				logger.info(`YAML configuration set for ${configData.serviceName} (${configData.environment})`);
+				return { success: true, serviceName: configData.serviceName, environment: configData.environment, yamlPaths: configData.yamlPaths };
+			} catch (error: unknown) {
+				logger.error('Failed to set YAML configuration:', error);
+				return { success: false, error: String(error) };
+			}
 		})
 	);
 
@@ -539,11 +753,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		)
 	);
 
-	// Register document change handler
+	// Create debounced diagnostic update function
+	const debouncedDiagnosticsUpdate = debounce(
+		(document: vscode.TextDocument): void => {
+			diagnostics.updateDiagnostics(document);
+		},
+		300 // 300ms delay
+	);
+
+	// Register document change handler with debouncing
 	context.subscriptions.push(
 		vscode.workspace.onDidChangeTextDocument(async event => {
 			if (await isJ2Template(event.document)) {
-				diagnostics.updateDiagnostics(event.document);
+				debouncedDiagnosticsUpdate(event.document);
 			}
 		})
 	);
@@ -563,35 +785,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	yamlPathButton.tooltip = "Set YAML Paths";
 	yamlPathButton.command = 'j2magicwand.setYamlPath';
 	statusBarItems.push(yamlPathButton);
+	context.subscriptions.push(yamlPathButton);
 
 	const serviceButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
 	serviceButton.text = "$(server) J2 Service";
 	serviceButton.tooltip = "Manage Current Service";
 	serviceButton.command = 'j2magicwand.manageService';
 	statusBarItems.push(serviceButton);
+	context.subscriptions.push(serviceButton);
 
 	const codeLensButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
 	codeLensButton.text = "$(symbol-color) J2 CodeLens";
 	codeLensButton.tooltip = "Set CodeLens Title";
 	codeLensButton.command = 'j2magicwand.setCodeLensTitle';
 	statusBarItems.push(codeLensButton);
+	context.subscriptions.push(codeLensButton);
 
 	const renderButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 98);
 	renderButton.text = "$(preview) J2 Render";
 	renderButton.tooltip = "Show rendered template";
 	renderButton.command = 'j2magicwand.renderView';
 	statusBarItems.push(renderButton);
+	context.subscriptions.push(renderButton);
 
 	const languageButton = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 97);
 	languageButton.text = "$(symbol-color) J2 Language";
 	languageButton.tooltip = "Change render view language";
 	languageButton.command = 'j2magicwand.changeRenderLanguage';
 	statusBarItems.push(languageButton);
+	context.subscriptions.push(languageButton);
 
 	// Show/hide status bar items based on active editor
 	context.subscriptions.push(
-		vscode.window.onDidChangeActiveTextEditor(editor => {
-			if (editor && editor.document.languageId === 'j2') {
+		vscode.window.onDidChangeActiveTextEditor(async editor => {
+			if (editor && await isJ2Template(editor.document)) {
 				statusBarItems.forEach(item => item.show());
 			} else {
 				statusBarItems.forEach(item => item.hide());
@@ -600,7 +827,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 	);
 
 	// Show status bar items if initial editor is J2
-	if (vscode.window.activeTextEditor?.document.languageId === 'j2') {
+	if (vscode.window.activeTextEditor && await isJ2Template(vscode.window.activeTextEditor.document)) {
 		statusBarItems.forEach(item => item.show());
 	}
 }
@@ -611,11 +838,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
  */
 export function deactivate(): void {
 	logger.info('Extension deactivating...');
-	diagnostics.dispose();
-	placeholderProvider.dispose();
-	renderView.dispose();
-	hotReload?.dispose();
-	statusBarItems.forEach(item => item.dispose());
+
+	// Dispose components safely
+	if (diagnostics) {
+		diagnostics.dispose();
+	}
+	if (placeholderProvider) {
+		placeholderProvider.dispose();
+	}
+	if (renderView) {
+		renderView.dispose();
+	}
+	if (hotReload) {
+		hotReload.dispose();
+	}
+
+	// Status bar items are already disposed via context.subscriptions
+	statusBarItems.length = 0;
+
 	logger.info('All components disposed');
 }
 
@@ -629,18 +869,26 @@ async function checkForVsixUpdate(): Promise<void> {
 	function getAllVsixFiles(dir: string): string[] {
 		let results: string[] = [];
 		try {
+			if (!fs.existsSync(dir)) {
+				logger.warn(`VSIX scan folder does not exist: ${dir}`);
+				return results;
+			}
 			const list = fs.readdirSync(dir);
 			for (const file of list) {
-				const filePath = path.join(dir, file);
-				const stat = fs.statSync(filePath);
-				if (stat && stat.isDirectory()) {
-					results = results.concat(getAllVsixFiles(filePath));
-				} else if (filePath.toLowerCase().endsWith('.vsix')) {
-					results.push(filePath);
+				try {
+					const filePath = path.join(dir, file);
+					const stat = fs.statSync(filePath);
+					if (stat && stat.isDirectory()) {
+						results = results.concat(getAllVsixFiles(filePath));
+					} else if (filePath.toLowerCase().endsWith('.vsix')) {
+						results.push(filePath);
+					}
+				} catch (fileError) {
+					logger.warn(`Error accessing file ${file}:`, fileError);
 				}
 			}
-		} catch (e) {
-			// Ignore errors
+		} catch (error: unknown) {
+			logger.error(`Error scanning directory ${dir}:`, error);
 		}
 		return results;
 	}
@@ -659,12 +907,55 @@ async function checkForVsixUpdate(): Promise<void> {
 
 	if (installedVersion && compareVersions(latest.version!, installedVersion) > 0) {
 		const fullPath = latest.file;
-		const result = await vscode.window.showInformationMessage(
-			`A newer version (${latest.version}) of J2 Magic Wand is available. Update now?`,
-			'Update'
-		);
-		if (result === 'Update') {
-			await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(fullPath));
+		const config = vscode.workspace.getConfiguration('j2magicwand');
+		const autoUpdate = config.get('autoUpdate', true);
+		const silentUpdate = config.get('silentUpdate', false);
+
+		if (!autoUpdate) {
+			logger.info(`Update available (${latest.version}) but auto-update is disabled`);
+			return;
+		}
+
+		if (!silentUpdate) {
+			const result = await vscode.window.showInformationMessage(
+				`A newer version (${latest.version}) of J2 Magic Wand is available. Update now?`,
+				'Update',
+				'Skip'
+			);
+			if (result !== 'Update') {
+				return;
+			}
+		}
+
+		try {
+			logger.info(`Installing J2 Magic Wand update: ${latest.version}`);
+			await withTimeout(
+				Promise.resolve(vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(fullPath))),
+				30000, // 30 second timeout
+				'Extension installation timed out'
+			);
+
+			// Always notify that new version is installed
+			vscode.window.showInformationMessage(`J2 Magic Wand updated to ${latest.version}`);
+
+			if (silentUpdate) {
+				// Auto-reload after a short delay
+				setTimeout(async () => {
+					await vscode.commands.executeCommand('workbench.action.reloadWindow');
+				}, 3000);
+			} else {
+				const reload = await vscode.window.showInformationMessage(
+					`Reload VS Code to use the new version?`,
+					'Reload',
+					'Later'
+				);
+				if (reload === 'Reload') {
+					await vscode.commands.executeCommand('workbench.action.reloadWindow');
+				}
+			}
+		} catch (error: unknown) {
+			logger.error('Failed to install extension update:', error);
+			vscode.window.showErrorMessage('Failed to install extension update');
 		}
 	}
 }

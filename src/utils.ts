@@ -25,6 +25,15 @@ export const logger = {
             outputChannel.appendLine(error.toString());
         }
     },
+    warn: (message: string, error?: unknown): void => {
+        if (!outputChannel) {
+            outputChannel = vscode.window.createOutputChannel('J2 Magic Wand');
+        }
+        outputChannel.appendLine(`[WARN] ${message}`);
+        if (error) {
+            outputChannel.appendLine(error.toString());
+        }
+    },
     debug: (message: string): void => {
         if (!outputChannel) {
             outputChannel = vscode.window.createOutputChannel('J2 Magic Wand');
@@ -86,7 +95,24 @@ export function escapeHtml(unsafe: string): string {
  * @returns The configuration value.
  */
 export function getConfig<T>(key: string, defaultValue: T): T {
-    return vscode.workspace.getConfiguration('j2magicwand').get(key, defaultValue);
+    const config = vscode.workspace.getConfiguration('j2magicwand');
+    const value = config.get<T>(key);
+    return value !== undefined ? value : defaultValue;
+}
+
+/**
+ * Synchronously checks if a document is a J2 template.
+ * @param document The document to check.
+ * @returns true if the file is a J2 template.
+ */
+export function isJ2TemplateSync(document: vscode.TextDocument): boolean {
+    // First check if VS Code has identified this as a J2 file by language ID
+    if (document.languageId === 'j2') {
+        return true;
+    }
+
+    // Fall back to simple extension check
+    return document.fileName.endsWith('.j2');
 }
 
 /**
@@ -95,6 +121,11 @@ export function getConfig<T>(key: string, defaultValue: T): T {
  * @returns Promise that resolves to true if the file is a J2 template.
  */
 export async function isJ2Template(document: vscode.TextDocument): Promise<boolean> {
+    // First check if VS Code has identified this as a J2 file by language ID
+    if (document.languageId === 'j2') {
+        return true;
+    }
+
     const config = vscode.workspace.getConfiguration('j2magicwand');
     const filePatterns = config.get('filePatterns', ['**/*.j2']) as string[];
 
@@ -122,4 +153,58 @@ export async function isJ2Template(document: vscode.TextDocument): Promise<boole
  */
 export function getDocumentText(document: vscode.TextDocument): string {
     return document.getText(); // Do NOT normalize line endings for diagnostics!
+}
+
+/**
+ * Creates a debounced version of a function.
+ * @param fn The function to debounce.
+ * @param delay The delay in milliseconds.
+ * @returns The debounced function.
+ */
+export function debounce<T extends (...args: any[]) => any>(
+    fn: T,
+    delay: number
+): (...args: Parameters<T>) => void {
+    let timeoutId: NodeJS.Timeout | undefined;
+
+    return (...args: Parameters<T>) => {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+
+        timeoutId = setTimeout(() => {
+            fn(...args);
+            timeoutId = undefined;
+        }, delay);
+    };
+}
+
+/**
+ * Creates a promise that rejects after a timeout.
+ * @param promise The promise to wrap.
+ * @param timeoutMs The timeout in milliseconds.
+ * @param errorMessage The error message to use on timeout.
+ * @returns A promise that rejects if the timeout is reached.
+ */
+export async function withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    errorMessage: string = 'Operation timed out'
+): Promise<T> {
+    let timeoutId: NodeJS.Timeout;
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+            reject(new Error(errorMessage));
+        }, timeoutMs);
+    });
+
+    try {
+        const result = await Promise.race([promise, timeoutPromise]);
+        clearTimeout(timeoutId!);
+        return result;
+    } catch (error: unknown) {
+        clearTimeout(timeoutId!);
+        throw error;
+    }
 }

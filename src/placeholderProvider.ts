@@ -5,8 +5,8 @@
  */
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as yaml from 'js-yaml';
 import { logger } from './utils';
+import { safeParseYaml } from './parsing';
 
 export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.CompletionItemProvider {
     private onDidChangeCodeLensesEmitter = new vscode.EventEmitter<void>();
@@ -44,7 +44,7 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
 
         while ((match = placeholderRegex.exec(text)) !== null) {
             const variable = match[1].trim();
-            if (!variable.includes(' ')) { // Only add CodeLens for valid placeholders
+            if (variable && !variable.includes(' ')) { // Only add CodeLens for valid variable names
                 const range = new vscode.Range(
                     document.positionAt(match.index),
                     document.positionAt(match.index + match[0].length)
@@ -54,7 +54,10 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
                 if (!placeholdersByLine.has(line)) {
                     placeholdersByLine.set(line, []);
                 }
-                placeholdersByLine.get(line)?.push({ variable, range });
+                const lineArray = placeholdersByLine.get(line);
+                if (lineArray) {
+                    lineArray.push({ variable, range });
+                }
             }
         }
 
@@ -155,7 +158,7 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
             }
 
             return completionItems;
-        } catch (error) {
+        } catch (error: unknown) {
             logger.error('Error providing completion items:', error);
             return [];
         }
@@ -172,10 +175,22 @@ export class J2PlaceholderProvider implements vscode.CodeLensProvider, vscode.Co
         // Load placeholders from each YAML file, with later files overriding earlier ones
         for (const yamlPath of yamlPaths) {
             try {
-                const yamlContent = fs.readFileSync(yamlPath, 'utf8');
-                const filePlaceholders = yaml.load(yamlContent) as Record<string, unknown>;
-                Object.assign(placeholders, filePlaceholders);
-            } catch (error) {
+                if (!fs.existsSync(yamlPath)) {
+                    logger.error(`YAML file not found: ${yamlPath}`);
+                    continue;
+                }
+                let yamlContent: string;
+                try {
+                    yamlContent = fs.readFileSync(yamlPath, 'utf8');
+                } catch (readError) {
+                    logger.error(`Failed to read YAML file ${yamlPath}:`, readError);
+                    continue;
+                }
+                const filePlaceholders = safeParseYaml(yamlContent, yamlPath);
+                if (filePlaceholders) {
+                    Object.assign(placeholders, filePlaceholders);
+                }
+            } catch (error: unknown) {
                 logger.error(`Error reading YAML file ${yamlPath}:`, error);
             }
         }

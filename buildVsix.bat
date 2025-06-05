@@ -1,2 +1,1 @@
-npm install
-npx vsce package
+npm install && npx vsce package

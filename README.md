@@ -35,6 +35,18 @@ A powerful Visual Studio Code extension for working with Jinja2 (J2) template fi
 - **YAML Paths**: Configure one or more YAML files in settings (`j2magicwand.yamlPaths`).
 - **VSIX Scan Folder**: Set the folder to scan for VSIX updates (`j2magicwand.vsixScanFolder`).
 - **CodeLens Title**: Customize the CodeLens action text (`j2magicwand.codeLensTitle`).
+- **Auto Update**: Enable automatic VSIX updates (`j2magicwand.autoUpdate`).
+- **Silent Update**: Install updates silently and auto-reload (`j2magicwand.silentUpdate`).
+
+## External Integration
+
+You can update YAML paths from external applications using VS Code's command-line interface:
+
+```bash
+code --command "j2magicwand.updateYamlPaths" "[\"C:\\path\\to\\file1.yaml\", \"C:\\path\\to\\file2.yaml\"]"
+```
+
+See [EXTERNAL_UPDATE.md](EXTERNAL_UPDATE.md) for detailed integration instructions.
 
 ## Development
 

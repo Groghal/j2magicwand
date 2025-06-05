@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { logger } from './utils';
+import { logger, withTimeout } from './utils';
+import { safeParseJson } from './parsing';
 
 export class HotReload {
     private disposables: vscode.Disposable[] = [];
@@ -40,7 +41,7 @@ export class HotReload {
 
             await fs.promises.writeFile(this.stateFile, JSON.stringify(state, null, 2));
             logger.info('Workspace state saved');
-        } catch (error) {
+        } catch (error: unknown) {
             logger.error('Failed to save workspace state:', error);
         }
     }
@@ -51,49 +52,65 @@ export class HotReload {
                 return;
             }
 
-            const state = JSON.parse(await fs.promises.readFile(this.stateFile, 'utf8'));
+            const data = await fs.promises.readFile(this.stateFile, 'utf8');
+            const state = safeParseJson<{ activeEditor?: string; visibleEditors?: Array<{ uri: string; viewColumn: number }> }>(data, 'hot-reload-state.json');
+            if (!state) {
+                return;
+            }
 
             // Restore visible editors
             for (const editor of state.visibleEditors || []) {
-                if (fs.existsSync(editor.uri)) {
-                    const doc = await vscode.workspace.openTextDocument(editor.uri);
-                    await vscode.window.showTextDocument(doc, editor.viewColumn);
+                try {
+                    if (fs.existsSync(editor.uri)) {
+                        const doc = await vscode.workspace.openTextDocument(editor.uri);
+                        await vscode.window.showTextDocument(doc, editor.viewColumn);
+                    }
+                } catch (openError) {
+                    logger.warn(`Failed to restore editor ${editor.uri}:`, openError);
                 }
             }
 
             // Restore active editor
             if (state.activeEditor && fs.existsSync(state.activeEditor)) {
-                const doc = await vscode.workspace.openTextDocument(state.activeEditor);
-                await vscode.window.showTextDocument(doc);
+                try {
+                    const doc = await vscode.workspace.openTextDocument(state.activeEditor);
+                    await vscode.window.showTextDocument(doc);
+                } catch (activeError) {
+                    logger.warn(`Failed to restore active editor ${state.activeEditor}:`, activeError);
+                }
             }
 
             logger.info('Workspace state restored');
-        } catch (error) {
+        } catch (error: unknown) {
             logger.error('Failed to restore workspace state:', error);
         }
     }
 
     private startWatching(): void {
-        // Watch for changes in the extension's source files
-        const watcher = fs.watch(this.extensionPath, { recursive: true }, async (eventType, filename) => {
-            if (!filename) {return;}
+        try {
+            // Watch for changes in the extension's source files
+            const watcher = fs.watch(this.extensionPath, { recursive: true }, async (eventType, filename) => {
+                if (!filename) {return;}
 
-            // Only watch TypeScript files
-            if (!filename.endsWith('.ts')) {return;}
+                // Only watch TypeScript files
+                if (!filename.endsWith('.ts')) {return;}
 
-            // Ignore changes in node_modules and out directories
-            if (filename.includes('node_modules') || filename.includes('out')) {return;}
+                // Ignore changes in node_modules and out directories
+                if (filename.includes('node_modules') || filename.includes('out')) {return;}
 
-            logger.info(`File changed: ${filename}`);
+                logger.info(`File changed: ${filename}`);
 
-            // Save workspace state before reloading
-            await this.saveWorkspaceState();
+                // Save workspace state before reloading
+                await this.saveWorkspaceState();
 
-            // Reload the extension
-            await this.reloadExtension();
-        });
+                // Reload the extension
+                await this.reloadExtension();
+            });
 
-        this.disposables.push({ dispose: () => watcher.close() });
+            this.disposables.push({ dispose: () => watcher.close() });
+        } catch (error: unknown) {
+            logger.error('Failed to start file watcher:', error);
+        }
     }
 
     private handleFileChange(uri: vscode.Uri): void {
@@ -125,8 +142,12 @@ export class HotReload {
 
         try {
             this.isReloading = true;
-            await vscode.commands.executeCommand('workbench.action.reloadWindow');
-        } catch (error) {
+            await withTimeout(
+                Promise.resolve(vscode.commands.executeCommand('workbench.action.reloadWindow')),
+                5000, // 5 second timeout
+                'Window reload timed out'
+            );
+        } catch (error: unknown) {
             logger.error('Failed to reload extension:', error);
         } finally {
             this.isReloading = false;

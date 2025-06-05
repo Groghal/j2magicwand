@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as yaml from 'js-yaml';
 import * as path from 'path';
 import { logger } from './utils';
+import { safeParseYaml, safeParseJson } from './parsing';
 
 export class J2RenderView {
     private panel: vscode.WebviewPanel | undefined;
@@ -30,7 +31,7 @@ export class J2RenderView {
 
             // If we have an active document, update the view
             if (this.lastJ2DocumentUri) {
-                vscode.workspace.openTextDocument(this.lastJ2DocumentUri).then(document => {
+                Promise.resolve(vscode.workspace.openTextDocument(this.lastJ2DocumentUri)).then(document => {
                     this.updateRenderView(document);
                 });
             }
@@ -105,7 +106,7 @@ export class J2RenderView {
                 // Get current service name
                 let serviceName = '';
                 if (this.context.globalState) {
-                    serviceName = this.context.globalState.get('j2magicwand.lastService', '');
+                    serviceName = this.context.globalState.get('j2magicwand.lastService', '') as string || '';
                 }
                 if (!serviceName) {
                     // Try to get service name from active editor or the last J2 document
@@ -126,7 +127,8 @@ export class J2RenderView {
                 let allConfigs: Array<{ serviceName: string; environment: string; yamlPaths: string[] }> = [];
                 if (fs.existsSync(saveFile)) {
                     try {
-                        allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+                        const data = fs.readFileSync(saveFile, 'utf8');
+                    allConfigs = safeParseJson<Array<{ serviceName: string; environment: string; yamlPaths: string[] }>>(data, 'j2magicwand-yaml-configs.json') || [];
 
                         // Case-insensitive comparison to make it more forgiving
                         environments = allConfigs
@@ -134,11 +136,12 @@ export class J2RenderView {
                                 c.serviceName.toLowerCase() === serviceName.toLowerCase())
                             .map((c: { serviceName: string; environment: string }) => c.environment);
 
-                    } catch (error) {
-                        console.error('Error parsing config file:', error);
+                    } catch (error: unknown) {
+                        logger.error('Error parsing config file:', error);
+                        // Error already logged above
                     }
                 } else {
-                    console.log(`Config file not found at: ${saveFile}`);
+                    logger.debug(`Config file not found at: ${saveFile}`);
                 }
                 if (environments.length === 0) {
                     vscode.window.showWarningMessage('No saved environments found for this service.');
@@ -213,16 +216,18 @@ export class J2RenderView {
 
             // Replace all placeholders with their values
             const placeholderRegex = /{{([^}]+)}}/g;
-            let match;
-            while ((match = placeholderRegex.exec(text)) !== null) {
-                const variable = match[1];
-                if (!variable.includes(' ')) {
+            renderedText = text.replace(placeholderRegex, (match, variableRaw) => {
+                const variable = variableRaw.trim();
+                // Only process valid variable names (no spaces)
+                if (variable && !variable.includes(' ')) {
                     const value = placeholders[variable];
                     if (value !== undefined) {
-                        renderedText = renderedText.replace(match[0], String(value));
+                        return String(value);
                     }
                 }
-            }
+                // Return original if not found or invalid
+                return match;
+            });
 
             this.panel.webview.html = this.getWebviewContent(document, renderedText);
         } catch (error: unknown) {
@@ -240,9 +245,21 @@ export class J2RenderView {
 
         for (const yamlPath of yamlPaths) {
             try {
-                const yamlContent = fs.readFileSync(yamlPath, 'utf8');
-                const filePlaceholders = yaml.load(yamlContent) as Record<string, unknown>;
-                Object.assign(placeholders, filePlaceholders);
+                if (!fs.existsSync(yamlPath)) {
+                    logger.error(`YAML file not found: ${yamlPath}`);
+                    continue;
+                }
+                let yamlContent: string;
+                try {
+                    yamlContent = fs.readFileSync(yamlPath, 'utf8');
+                } catch (readError) {
+                    logger.error(`Failed to read YAML file ${yamlPath}:`, readError);
+                    continue;
+                }
+                const filePlaceholders = safeParseYaml(yamlContent, yamlPath);
+                if (filePlaceholders) {
+                    Object.assign(placeholders, filePlaceholders);
+                }
             } catch (error: unknown) {
                 logger.error(`Error reading YAML file ${yamlPath}:`, error);
             }
@@ -373,8 +390,8 @@ export class J2RenderView {
         let serviceName = '';
         let environment = '';
         if (this.context.globalState) {
-            serviceName = this.context.globalState.get('j2magicwand.lastService', '');
-            environment = this.context.globalState.get('j2magicwand.lastEnvironment', '');
+            serviceName = this.context.globalState.get('j2magicwand.lastService', '') as string || '';
+            environment = this.context.globalState.get('j2magicwand.lastEnvironment', '') as string || '';
         }
 
         // Fallbacks if not set
@@ -396,12 +413,13 @@ export class J2RenderView {
         let hasConfig = false;
         if (fs.existsSync(saveFile)) {
             try {
-                const allConfigs = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+                const data = fs.readFileSync(saveFile, 'utf8');
+                const allConfigs = safeParseJson<Array<{ serviceName: string; environment: string }>>(data, 'j2magicwand-yaml-configs.json') || [];
                 // Case-insensitive comparison to make it more forgiving
                 hasConfig = allConfigs.some((c: { serviceName: string; environment: string }) =>
                     c.serviceName.toLowerCase() === serviceName.toLowerCase() &&
                     c.environment.toLowerCase() === environment.toLowerCase());
-            } catch (error) {
+            } catch (error: unknown) {
                 console.error('Error checking config:', error);
             }
         }
@@ -411,7 +429,7 @@ export class J2RenderView {
 
         const serviceEnvHtml = `
             <div class="service-env-bar">
-                <b>Service:</b> ${this.escapeHtml(serviceDisplay)} &nbsp; 
+                <b>Service:</b> ${this.escapeHtml(serviceDisplay)} &nbsp;
                 <b>Environment:</b> ${this.escapeHtml(environment)}
                 ${!hasConfig ? `
                 <div style="margin-top: 5px; color: #f97583; font-size: 12px;">
@@ -429,7 +447,13 @@ export class J2RenderView {
 
         // Load the HTML template
         const templatePath = this.context.asAbsolutePath('media/webviewTemplate.html');
-        let html = fs.readFileSync(templatePath, 'utf8');
+        let html: string;
+        try {
+            html = fs.readFileSync(templatePath, 'utf8');
+        } catch (error: unknown) {
+            logger.error('Failed to read webview template:', error);
+            return `<html><body><h1>Error</h1><p>Failed to load webview template: ${error}</p></body></html>`;
+        }
 
         // Replace placeholders
         html = html.replace('{{syntaxClass}}', isValid ? 'syntax-valid' : 'syntax-invalid')

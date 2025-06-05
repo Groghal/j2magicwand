@@ -2,10 +2,10 @@
   "name": "j2magicwand",
   "displayName": "J2 Magic Wand",
   "description": "Enhanced J2 template support with YAML-based placeholders",
-  "version": "0.0.7",
+  "version": "0.0.11",
   "author": "Kazinskiy",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.60.0"
   },
   "categories": [
     "Programming Languages",
@@ -52,6 +52,14 @@
       {
         "command": "j2magicwand.renderView",
         "title": "J2 Magic Wand: Show Rendered View"
+      },
+      {
+        "command": "j2magicwand.updateYamlPaths",
+        "title": "J2 Magic Wand: Update YAML Paths (API)"
+      },
+      {
+        "command": "j2magicwand.setYamlConfiguration",
+        "title": "J2 Magic Wand: Set YAML Configuration (API)"
       }
     ],
     "configuration": {
@@ -83,6 +91,16 @@
           },
           "default": ["**/*.j2"],
           "description": "Glob patterns for files that should be handled by the extension. Example: ['**/appsettings.*.j2', '**/config.*.j2']"
+        },
+        "j2magicwand.autoUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically check for and install VSIX updates."
+        },
+        "j2magicwand.silentUpdate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Install updates silently without prompting and auto-reload VS Code."
         }
       }
     }
@@ -103,7 +121,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/mocha": "^10.0.6",
     "@types/node": "20.x",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "^1.60.0",
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "@vscode/test-electron": "^2.3.8",
@@ -119,6 +137,6 @@
   "publisher": "j2magicwand",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/j2magicwand"
+    "url": "https://github.com/groghal/j2magicwand"
   }
 }
