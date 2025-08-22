@@ -104,86 +104,87 @@ export class CentralSettingsLoader {
         logger.info(`Total services found: ${services.size}`);
         logger.info(`Total environments found: ${environments.size}`);
 
-        // First, create a global configuration with just the root YAML files
-        const globalYamlPaths: string[] = [];
-        
-        // Add global base
+        // Create separate configurations for each service-environment combination
         const globalBase = path.join(centralPath, 'application.yml');
-        if (fs.existsSync(globalBase)) {
-            globalYamlPaths.push(globalBase);
-        }
         
-        // Add all global environment files
-        for (const env of environments) {
-            const globalEnv = path.join(centralPath, `application-${env}.yml`);
-            if (fs.existsSync(globalEnv)) {
-                globalYamlPaths.push(globalEnv);
-            }
-        }
-        
-        // Add global config if we have any global YAML files
-        if (globalYamlPaths.length > 0) {
-            configs.push({
-                serviceName: 'global',
-                environment: 'all',
-                yamlPaths: globalYamlPaths
-            });
-            logger.info(`Created global config with ${globalYamlPaths.length} files`);
-        }
+        // If we have services, create configs for each service-environment combination
+        if (services.size > 0) {
+            for (const service of services) {
+                for (const env of environments) {
+                    const yamlPaths: string[] = [];
+                    
+                    // 1. Global base
+                    if (fs.existsSync(globalBase)) {
+                        yamlPaths.push(globalBase);
+                    }
 
-        // Create configuration for each service - just load ALL their YAML files
-        for (const service of services) {
-            const yamlPaths: string[] = [];
-            
-            // 1. Global base
-            if (fs.existsSync(globalBase)) {
-                yamlPaths.push(globalBase);
-            }
+                    // 2. Global environment file for this specific environment
+                    const globalEnv = path.join(centralPath, `application-${env}.yml`);
+                    if (fs.existsSync(globalEnv)) {
+                        yamlPaths.push(globalEnv);
+                    }
 
-            // 2. All global environment files
+                    // 3. Service base - try both patterns
+                    // First try: {service-name}.yml
+                    let serviceBase = path.join(centralPath, service, `${service}.yml`);
+                    if (fs.existsSync(serviceBase)) {
+                        yamlPaths.push(serviceBase);
+                    } else {
+                        // Fallback to: application.yml
+                        serviceBase = path.join(centralPath, service, 'application.yml');
+                        if (fs.existsSync(serviceBase)) {
+                            yamlPaths.push(serviceBase);
+                        }
+                    }
+
+                    // 4. Service environment file for this specific environment
+                    // First try: {service-name}-{env}.yml
+                    let serviceEnv = path.join(centralPath, service, `${service}-${env}.yml`);
+                    if (fs.existsSync(serviceEnv)) {
+                        yamlPaths.push(serviceEnv);
+                    } else {
+                        // Fallback to: application-{env}.yml
+                        serviceEnv = path.join(centralPath, service, `application-${env}.yml`);
+                        if (fs.existsSync(serviceEnv)) {
+                            yamlPaths.push(serviceEnv);
+                        }
+                    }
+
+                    // Add configuration for this service-environment combination
+                    if (yamlPaths.length > 0) {
+                        configs.push({
+                            serviceName: service,
+                            environment: env,
+                            yamlPaths: yamlPaths
+                        });
+                        logger.info(`Created config for ${service}-${env} with ${yamlPaths.length} files`);
+                    }
+                }
+            }
+        } else {
+            // No services found, just create global configs for each environment
             for (const env of environments) {
+                const yamlPaths: string[] = [];
+                
+                // Add global base
+                if (fs.existsSync(globalBase)) {
+                    yamlPaths.push(globalBase);
+                }
+                
+                // Add global environment file
                 const globalEnv = path.join(centralPath, `application-${env}.yml`);
                 if (fs.existsSync(globalEnv)) {
                     yamlPaths.push(globalEnv);
                 }
-            }
-
-            // 3. Service base - try both patterns
-            // First try: {service-name}.yml
-            let serviceBase = path.join(centralPath, service, `${service}.yml`);
-            if (fs.existsSync(serviceBase)) {
-                yamlPaths.push(serviceBase);
-            } else {
-                // Fallback to: application.yml
-                serviceBase = path.join(centralPath, service, 'application.yml');
-                if (fs.existsSync(serviceBase)) {
-                    yamlPaths.push(serviceBase);
+                
+                if (yamlPaths.length > 0) {
+                    configs.push({
+                        serviceName: 'global',
+                        environment: env,
+                        yamlPaths: yamlPaths
+                    });
+                    logger.info(`Created global config for environment ${env} with ${yamlPaths.length} files`);
                 }
-            }
-
-            // 4. All service environment files - try both patterns
-            for (const env of environments) {
-                // First try: {service-name}-{env}.yml
-                let serviceEnv = path.join(centralPath, service, `${service}-${env}.yml`);
-                if (fs.existsSync(serviceEnv)) {
-                    yamlPaths.push(serviceEnv);
-                } else {
-                    // Fallback to: application-{env}.yml
-                    serviceEnv = path.join(centralPath, service, `application-${env}.yml`);
-                    if (fs.existsSync(serviceEnv)) {
-                        yamlPaths.push(serviceEnv);
-                    }
-                }
-            }
-
-            // Add configuration with all environments for this service
-            if (yamlPaths.length > 0) {
-                configs.push({
-                    serviceName: service,
-                    environment: 'all', // Mark as containing all environments
-                    yamlPaths: yamlPaths
-                });
-                logger.info(`Created config for ${service} with ${yamlPaths.length} files (all environments)`);
             }
         }
 
@@ -244,13 +245,13 @@ export class CentralSettingsLoader {
             
             // First add existing
             for (const config of existingConfigs) {
-                const key = config.serviceName; // Use only service name as key since we have all envs
+                const key = `${config.serviceName}-${config.environment}`;
                 configMap.set(key, config);
             }
             
             // Then add/override with new ones
             for (const config of configs) {
-                const key = config.serviceName; // Use only service name as key since we have all envs
+                const key = `${config.serviceName}-${config.environment}`;
                 configMap.set(key, config);
             }
 
@@ -283,6 +284,9 @@ export class CentralSettingsLoader {
         const parentFolder = path.basename(path.dirname(j2FilePath));
         const serviceName = this.extractServiceName(parentFolder);
         
+        // Get the preferred environment (from last used or default)
+        const environment = context.globalState.get('j2magicwand.lastEnvironment', 'dev') as string;
+        
         // Load saved configurations
         const saveFile = vscode.Uri.joinPath(context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
         
@@ -294,11 +298,23 @@ export class CentralSettingsLoader {
             const data = fs.readFileSync(saveFile, 'utf8');
             const configs = safeParseJson<ServiceConfig[]>(data, 'j2magicwand-yaml-configs.json') || [];
             
-            // Find configuration for this service
-            const config = configs.find(c => c.serviceName === serviceName);
+            // Find configuration for this service and environment
+            let config = configs.find(c => 
+                c.serviceName === serviceName && c.environment === environment
+            );
+            
+            // If not found for the preferred environment, try to find any config for this service
+            if (!config) {
+                config = configs.find(c => c.serviceName === serviceName);
+                if (config) {
+                    logger.info(`No config found for ${serviceName}-${environment}, using ${serviceName}-${config.environment}`);
+                }
+            }
             
             if (config) {
-                logger.info(`Auto-loaded configuration for service: ${serviceName}`);
+                logger.info(`Auto-loaded configuration for service: ${serviceName}-${config.environment}`);
+                // Update the last environment to what we actually loaded
+                await context.globalState.update('j2magicwand.lastEnvironment', config.environment);
                 return config.yamlPaths;
             }
         } catch (error: unknown) {
