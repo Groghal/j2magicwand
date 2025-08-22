@@ -159,22 +159,56 @@ export class J2RenderView {
                         const config = vscode.workspace.getConfiguration('j2magicwand');
                         await config.update('yamlPaths', configForEnv.yamlPaths, true);
                         vscode.window.showInformationMessage('Loaded YAML paths: ' + configForEnv.yamlPaths.join(', '));
+                        
+                        // Small delay to ensure configuration is saved
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                        
+                        
                         // Force diagnostics update for all open J2 documents
                         await vscode.commands.executeCommand('j2magicwand.forceDiagnostics');
-                    } else {
-                        vscode.window.showWarningMessage('No YAML config found for this service/environment.');
-                    }
-                    // Refresh the webview with the active J2 document or last used J2 document
-                    if (this.panel) {
+                        
+                        // Get the document to refresh
                         let doc: vscode.TextDocument | undefined;
                         if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.languageId === 'j2') {
                             doc = vscode.window.activeTextEditor.document;
                         } else if (this.lastJ2DocumentUri) {
-                            doc = await vscode.workspace.openTextDocument(this.lastJ2DocumentUri);
+                            try {
+                                doc = await vscode.workspace.openTextDocument(this.lastJ2DocumentUri);
+                            } catch (error) {
+                                logger.error('Failed to open document for refresh:', error);
+                            }
                         }
-                        if (doc) {
-                            this.updateRenderView(doc);
+                        
+                        // Force a complete refresh of the render view
+                        if (this.panel && doc) {
+                            // Manually trigger the configuration change handler
+                            // since it might not fire automatically
+                            const text = doc.getText();
+                            let renderedText = text;
+                            
+                            // Reload placeholders with the NEW paths
+                            const placeholders = this.loadPlaceholders(configForEnv.yamlPaths);
+                            
+                            // Replace all placeholders with their values
+                            const placeholderRegex = /{{([^}]+)}}/g;
+                            renderedText = text.replace(placeholderRegex, (match, variableRaw) => {
+                                const variable = variableRaw.trim();
+                                if (variable && !variable.includes(' ')) {
+                                    const value = placeholders[variable];
+                                    if (value !== undefined) {
+                                        return String(value);
+                                    }
+                                }
+                                return match;
+                            });
+                            
+                            // Update the webview with the new content
+                            // Pass the actual YAML paths to ensure they're displayed correctly
+                            this.panel.webview.html = this.getWebviewContent(doc, renderedText, configForEnv.yamlPaths);
+                            logger.info(`Refreshed render view for environment: ${selected} with ${configForEnv.yamlPaths.length} paths`);
                         }
+                    } else {
+                        vscode.window.showWarningMessage('No YAML config found for this service/environment.');
                     }
                 }
             }
@@ -202,6 +236,7 @@ export class J2RenderView {
         try {
             const config = vscode.workspace.getConfiguration('j2magicwand');
             const yamlPaths = config.get('yamlPaths', []) as string[];
+            
 
             if (yamlPaths.length === 0) {
                 this.panel.webview.html = this.getWebviewContent(document, 'No YAML paths configured');
@@ -270,9 +305,10 @@ export class J2RenderView {
      * Generates the HTML content for the webview.
      * @param document The J2 template document.
      * @param content The rendered content to display.
+     * @param overrideYamlPaths Optional array of YAML paths to display (overrides config)
      * @returns The HTML string.
      */
-    private getWebviewContent(document: vscode.TextDocument, content: string = ''): string {
+    private getWebviewContent(document: vscode.TextDocument, content: string = '', overrideYamlPaths?: string[]): string {
         // Validate syntax based on current language
         let isValid = true;
         let validationMessage = '';
@@ -383,7 +419,7 @@ export class J2RenderView {
 
         // Get YAML files list and current service/environment
         const config = vscode.workspace.getConfiguration('j2magicwand');
-        const yamlPaths = config.get('yamlPaths', []) as string[];
+        const yamlPaths = overrideYamlPaths || config.get('yamlPaths', []) as string[];
         
         // Always get service name from current document path for accuracy
         let serviceName = 'unknown';
