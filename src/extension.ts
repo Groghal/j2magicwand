@@ -9,6 +9,7 @@ import { J2Diagnostics } from './diagnostics';
 import { J2PlaceholderProvider } from './placeholderProvider';
 import { J2RenderView } from './renderView';
 import { HotReload } from './hotReload';
+import { CentralSettingsLoader } from './centralSettings';
 
 let diagnostics: J2Diagnostics;
 let placeholderProvider: J2PlaceholderProvider;
@@ -147,6 +148,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				fileItems.push({ label: '$(file-add) Choose YAML file', description: '' });
 				fileItems.push({ label: '$(cloud-upload) Save', description: 'Save current YAML config' });
 				fileItems.push({ label: '$(cloud-download) Load', description: 'Load a saved YAML config' });
+				fileItems.push({ label: '$(trash) Delete', description: 'Delete a saved YAML config' });
 				fileItems.push({ label: '$(check) Done', description: 'Exit YAML path configuration' });
 
 				const selected = await vscode.window.showQuickPick(fileItems, {
@@ -252,6 +254,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						}
 					} catch (error: unknown) {
 						vscode.window.showErrorMessage(`Failed to load configuration: ${error}`);
+					}
+					continue;
+				}
+				if (selected.label === '$(trash) Delete') {
+					try {
+						const allConfigs = loadAllConfigs();
+						if (allConfigs.length === 0) {
+							vscode.window.showWarningMessage('No saved YAML configs found to delete.');
+							continue;
+						}
+						
+						const items = allConfigs.map((c: { serviceName: string; environment: string; yamlPaths: string[] }) => ({
+							label: `${c.serviceName} (${c.environment})`,
+							description: `${c.yamlPaths.length} YAML files`,
+							config: c
+						}));
+						
+						const selectedConfigs = await vscode.window.showQuickPick(items, {
+							placeHolder: 'Select configuration(s) to delete',
+							canPickMany: true
+						});
+						
+						if (selectedConfigs && selectedConfigs.length > 0) {
+							const confirmMsg = selectedConfigs.length === 1 
+								? `Delete configuration for ${selectedConfigs[0].config.serviceName} (${selectedConfigs[0].config.environment})?`
+								: `Delete ${selectedConfigs.length} configurations?`;
+								
+							const confirm = await vscode.window.showWarningMessage(
+								confirmMsg,
+								{ modal: true },
+								'Delete'
+							);
+							
+							if (confirm === 'Delete') {
+								// Filter out deleted configs
+								const remainingConfigs = allConfigs.filter((c: { serviceName: string; environment: string }) => 
+									!selectedConfigs.some(sc => 
+										sc.config.serviceName === c.serviceName && 
+										sc.config.environment === c.environment
+									)
+								);
+								
+								saveAllConfigs(remainingConfigs);
+								vscode.window.showInformationMessage(
+									`Deleted ${selectedConfigs.length} configuration(s)`
+								);
+							}
+						}
+					} catch (error: unknown) {
+						vscode.window.showErrorMessage(`Failed to delete configuration: ${error}`);
 					}
 					continue;
 				}
@@ -585,6 +637,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			}
 		}),
 
+		// Command to load YAML paths from central settings folder
+		vscode.commands.registerCommand('j2magicwand.loadFromCentralSettings', async () => {
+			await CentralSettingsLoader.loadFromCentralSettings(context);
+			// Refresh diagnostics and render view after loading
+			vscode.workspace.textDocuments.forEach(doc => {
+				if (doc.languageId === 'j2' && diagnostics) {
+					diagnostics.updateDiagnostics(doc);
+				}
+			});
+			const editor = vscode.window.activeTextEditor;
+			if (editor && editor.document.languageId === 'j2' && renderView) {
+				renderView.updateRenderView(editor.document);
+			}
+		}),
+
 		// Register a command to force diagnostics update for all open J2 documents
 		vscode.commands.registerCommand('j2magicwand.forceDiagnostics', () => {
 			vscode.workspace.textDocuments.forEach(doc => {
@@ -770,11 +837,47 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		})
 	);
 
-	// Register document open handler
+	// Register document open handler with auto-configuration loading
 	context.subscriptions.push(
 		vscode.workspace.onDidOpenTextDocument(async document => {
 			if (await isJ2Template(document)) {
+				// Try to auto-load configuration for this J2 file
+				const yamlPaths = await CentralSettingsLoader.loadConfigurationForFile(document.uri.fsPath, context);
+				if (yamlPaths && yamlPaths.length > 0) {
+					const config = vscode.workspace.getConfiguration('j2magicwand');
+					await config.update('yamlPaths', yamlPaths, vscode.ConfigurationTarget.Workspace);
+					logger.info(`Auto-loaded ${yamlPaths.length} YAML paths for ${document.uri.fsPath}`);
+				}
+				
 				diagnostics.updateDiagnostics(document);
+			}
+		})
+	);
+
+	// Register active editor change handler to auto-switch configurations
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(async editor => {
+			if (editor && await isJ2Template(editor.document)) {
+				// Try to auto-load configuration for this J2 file
+				const yamlPaths = await CentralSettingsLoader.loadConfigurationForFile(editor.document.uri.fsPath, context);
+				if (yamlPaths && yamlPaths.length > 0) {
+					const config = vscode.workspace.getConfiguration('j2magicwand');
+					const currentPaths = config.get('yamlPaths', []) as string[];
+					
+					// Only update if paths are different
+					if (JSON.stringify(currentPaths) !== JSON.stringify(yamlPaths)) {
+						await config.update('yamlPaths', yamlPaths, vscode.ConfigurationTarget.Workspace);
+						logger.info(`Auto-switched to ${yamlPaths.length} YAML paths for ${editor.document.uri.fsPath}`);
+						
+						// Update diagnostics for the new document
+						diagnostics.updateDiagnostics(editor.document);
+						
+						// Update render view if it's open
+						if (renderView) {
+							renderView.updateRenderView(editor.document);
+						}
+					}
+				}
 			}
 		})
 	);

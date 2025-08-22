@@ -2,7 +2,7 @@
   "name": "j2magicwand",
   "displayName": "J2 Magic Wand",
   "description": "Enhanced J2 template support with YAML-based placeholders",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "author": "Kazinskiy",
   "engines": {
     "vscode": "^1.60.0"
@@ -60,6 +60,10 @@
       {
         "command": "j2magicwand.setYamlConfiguration",
         "title": "J2 Magic Wand: Set YAML Configuration (API)"
+      },
+      {
+        "command": "j2magicwand.loadFromCentralSettings",
+        "title": "J2 Magic Wand: Load Settings from Central Folder"
       }
     ],
     "configuration": {
@@ -101,6 +105,11 @@
           "type": "boolean",
           "default": true,
           "description": "Install updates silently without prompting and auto-reload VS Code."
+        },
+        "j2magicwand.centralSettingsPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the central settings folder containing global and service-specific YAML files."
         }
       }
     }

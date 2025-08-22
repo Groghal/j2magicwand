@@ -9,6 +9,7 @@ import * as yaml from 'js-yaml';
 import * as path from 'path';
 import { logger } from './utils';
 import { safeParseYaml, safeParseJson } from './parsing';
+import { CentralSettingsLoader } from './centralSettings';
 
 export class J2RenderView {
     private panel: vscode.WebviewPanel | undefined;
@@ -88,6 +89,7 @@ export class J2RenderView {
         // Update render view when active editor changes
         const activeEditorChangeDisposable = vscode.window.onDidChangeActiveTextEditor(editor => {
             if (editor && editor.document.languageId === 'j2') {
+                this.lastJ2DocumentUri = editor.document.uri;
                 this.updateRenderView(editor.document);
             }
         });
@@ -103,22 +105,18 @@ export class J2RenderView {
                     vscode.window.showWarningMessage(`Unknown commandId sent from webview: ${message.commandId}`);
                 }
             } else if (message.command === 'changeEnvironment') {
-                // Get current service name
+                // Get current service name from active editor or the last J2 document
                 let serviceName = '';
-                if (this.context.globalState) {
-                    serviceName = this.context.globalState.get('j2magicwand.lastService', '') as string || '';
-                }
-                if (!serviceName) {
-                    // Try to get service name from active editor or the last J2 document
-                    const editor = vscode.window.activeTextEditor;
-                    if (editor && editor.document.uri.fsPath) {
-                        serviceName = path.basename(path.dirname(editor.document.uri.fsPath));
-                    } else if (this.lastJ2DocumentUri && this.lastJ2DocumentUri.fsPath) {
-                        serviceName = path.basename(path.dirname(this.lastJ2DocumentUri.fsPath));
-                    } else {
-                        serviceName = 'default';
-                        vscode.window.showWarningMessage('Could not determine service name from file path. Using "default".');
-                    }
+                const editor = vscode.window.activeTextEditor;
+                if (editor && editor.document.uri.fsPath && editor.document.languageId === 'j2') {
+                    const parentFolder = path.basename(path.dirname(editor.document.uri.fsPath));
+                    serviceName = CentralSettingsLoader.extractServiceName(parentFolder);
+                } else if (this.lastJ2DocumentUri && this.lastJ2DocumentUri.fsPath) {
+                    const parentFolder = path.basename(path.dirname(this.lastJ2DocumentUri.fsPath));
+                    serviceName = CentralSettingsLoader.extractServiceName(parentFolder);
+                } else {
+                    serviceName = 'default';
+                    vscode.window.showWarningMessage('Could not determine service name from file path. Using "default".');
                 }
                 // Load all saved configs
                 const saveFile = vscode.Uri.joinPath(this.context.globalStorageUri, 'j2magicwand-yaml-configs.json').fsPath;
@@ -386,22 +384,18 @@ export class J2RenderView {
         // Get YAML files list and current service/environment
         const config = vscode.workspace.getConfiguration('j2magicwand');
         const yamlPaths = config.get('yamlPaths', []) as string[];
-        // Get service name and environment from globalState if available
-        let serviceName = '';
+        
+        // Always get service name from current document path for accuracy
+        let serviceName = 'unknown';
+        if (document && document.uri && document.uri.fsPath) {
+            const parentFolder = path.basename(path.dirname(document.uri.fsPath));
+            serviceName = CentralSettingsLoader.extractServiceName(parentFolder);
+        }
+        
+        // Get environment from globalState
         let environment = '';
         if (this.context.globalState) {
-            serviceName = this.context.globalState.get('j2magicwand.lastService', '') as string || '';
             environment = this.context.globalState.get('j2magicwand.lastEnvironment', '') as string || '';
-        }
-
-        // Fallbacks if not set
-        if (!serviceName) {
-            // Try to get service name from current document path
-            if (document && document.uri && document.uri.fsPath) {
-                serviceName = path.basename(path.dirname(document.uri.fsPath));
-            } else {
-                serviceName = 'unknown';
-            }
         }
 
         if (!environment) {
