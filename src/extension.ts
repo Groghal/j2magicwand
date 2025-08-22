@@ -149,6 +149,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 				fileItems.push({ label: '$(cloud-upload) Save', description: 'Save current YAML config' });
 				fileItems.push({ label: '$(cloud-download) Load', description: 'Load a saved YAML config' });
 				fileItems.push({ label: '$(trash) Delete', description: 'Delete a saved YAML config' });
+				fileItems.push({ label: '$(flame) Wipe All', description: 'Delete ALL saved configurations' });
 				fileItems.push({ label: '$(check) Done', description: 'Exit YAML path configuration' });
 
 				const selected = await vscode.window.showQuickPick(fileItems, {
@@ -304,6 +305,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 						}
 					} catch (error: unknown) {
 						vscode.window.showErrorMessage(`Failed to delete configuration: ${error}`);
+					}
+					continue;
+				}
+				if (selected.label === '$(flame) Wipe All') {
+					try {
+						const allConfigs = loadAllConfigs();
+						if (allConfigs.length === 0) {
+							vscode.window.showWarningMessage('No saved configurations to wipe.');
+							continue;
+						}
+						
+						const confirm = await vscode.window.showWarningMessage(
+							`Are you sure you want to delete ALL ${allConfigs.length} saved configurations? This cannot be undone.`,
+							{ modal: true },
+							'Wipe All'
+						);
+						
+						if (confirm === 'Wipe All') {
+							// Clear all saved configs
+							saveAllConfigs([]);
+							
+							// Also clear the current YAML paths
+							currentPaths = [];
+							await config.update('yamlPaths', currentPaths, true);
+							
+							// Clear stored central path
+							await config.update('centralSettingsPath', '', vscode.ConfigurationTarget.Workspace);
+							
+							vscode.window.showInformationMessage('All configurations have been wiped.');
+							refreshJ2Webview();
+						}
+					} catch (error: unknown) {
+						vscode.window.showErrorMessage(`Failed to wipe configurations: ${error}`);
 					}
 					continue;
 				}

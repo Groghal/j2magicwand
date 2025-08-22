@@ -39,19 +39,24 @@ export class CentralSettingsLoader {
             return [];
         }
 
+        logger.info(`Scanning central settings folder: ${centralPath}`);
         const configs: ServiceConfig[] = [];
         const environments = new Set<string>();
         const services = new Set<string>();
         
         // Find all environments from root application-{env}.yml files
         const rootFiles = fs.readdirSync(centralPath);
+        logger.info(`Found ${rootFiles.length} files/folders in root`);
+        
         for (const file of rootFiles) {
             if (file === 'application.yml' || file === 'application.yaml') {
+                logger.info(`Found global base config: ${file}`);
                 continue; // Skip base file
             }
             const match = file.match(/^application-(.+)\.(yml|yaml)$/);
             if (match) {
                 environments.add(match[1]);
+                logger.info(`Found environment: ${match[1]}`);
             }
         }
 
@@ -60,22 +65,70 @@ export class CentralSettingsLoader {
         for (const entry of entries) {
             if (entry.isDirectory()) {
                 const serviceDir = path.join(centralPath, entry.name);
-                const serviceFiles = fs.readdirSync(serviceDir);
+                logger.info(`Checking directory: ${entry.name}`);
                 
-                // Check if directory has any YAML files
-                const hasYaml = serviceFiles.some(f => f.endsWith('.yml') || f.endsWith('.yaml'));
-                if (hasYaml) {
-                    services.add(entry.name);
+                try {
+                    const serviceFiles = fs.readdirSync(serviceDir);
+                    logger.info(`  Found ${serviceFiles.length} files in ${entry.name}`);
                     
-                    // Also check for service-specific environments
-                    for (const file of serviceFiles) {
-                        const match = file.match(/^application-(.+)\.(yml|yaml)$/);
-                        if (match) {
-                            environments.add(match[1]);
+                    // Check if directory has any YAML files
+                    const hasYaml = serviceFiles.some(f => f.endsWith('.yml') || f.endsWith('.yaml'));
+                    if (hasYaml) {
+                        services.add(entry.name);
+                        logger.info(`  Added service: ${entry.name}`);
+                        
+                        // Check for service-specific environment files
+                        // Pattern: {service-name}-{env}.yml or {service-name}-{env}.yaml
+                        for (const file of serviceFiles) {
+                            // First check for application-{env} pattern
+                            let match = file.match(/^application-(.+)\.(yml|yaml)$/);
+                            if (!match) {
+                                // Then check for {service-name}-{env} pattern
+                                const serviceNamePattern = new RegExp(`^${entry.name}-(.+)\\.(yml|yaml)$`);
+                                match = file.match(serviceNamePattern);
+                            }
+                            if (match) {
+                                environments.add(match[1]);
+                                logger.info(`  Found service environment: ${match[1]}`);
+                            }
                         }
+                    } else {
+                        logger.info(`  No YAML files found in ${entry.name}, skipping`);
                     }
+                } catch (error) {
+                    logger.warn(`  Error reading directory ${entry.name}: ${error}`);
                 }
             }
+        }
+        
+        logger.info(`Total services found: ${services.size}`);
+        logger.info(`Total environments found: ${environments.size}`);
+
+        // First, create a global configuration with just the root YAML files
+        const globalYamlPaths: string[] = [];
+        
+        // Add global base
+        const globalBase = path.join(centralPath, 'application.yml');
+        if (fs.existsSync(globalBase)) {
+            globalYamlPaths.push(globalBase);
+        }
+        
+        // Add all global environment files
+        for (const env of environments) {
+            const globalEnv = path.join(centralPath, `application-${env}.yml`);
+            if (fs.existsSync(globalEnv)) {
+                globalYamlPaths.push(globalEnv);
+            }
+        }
+        
+        // Add global config if we have any global YAML files
+        if (globalYamlPaths.length > 0) {
+            configs.push({
+                serviceName: 'global',
+                environment: 'all',
+                yamlPaths: globalYamlPaths
+            });
+            logger.info(`Created global config with ${globalYamlPaths.length} files`);
         }
 
         // Create configuration for each service - just load ALL their YAML files
@@ -83,7 +136,6 @@ export class CentralSettingsLoader {
             const yamlPaths: string[] = [];
             
             // 1. Global base
-            const globalBase = path.join(centralPath, 'application.yml');
             if (fs.existsSync(globalBase)) {
                 yamlPaths.push(globalBase);
             }
@@ -96,17 +148,31 @@ export class CentralSettingsLoader {
                 }
             }
 
-            // 3. Service base
-            const serviceBase = path.join(centralPath, service, 'application.yml');
+            // 3. Service base - try both patterns
+            // First try: {service-name}.yml
+            let serviceBase = path.join(centralPath, service, `${service}.yml`);
             if (fs.existsSync(serviceBase)) {
                 yamlPaths.push(serviceBase);
+            } else {
+                // Fallback to: application.yml
+                serviceBase = path.join(centralPath, service, 'application.yml');
+                if (fs.existsSync(serviceBase)) {
+                    yamlPaths.push(serviceBase);
+                }
             }
 
-            // 4. All service environment files
+            // 4. All service environment files - try both patterns
             for (const env of environments) {
-                const serviceEnv = path.join(centralPath, service, `application-${env}.yml`);
+                // First try: {service-name}-{env}.yml
+                let serviceEnv = path.join(centralPath, service, `${service}-${env}.yml`);
                 if (fs.existsSync(serviceEnv)) {
                     yamlPaths.push(serviceEnv);
+                } else {
+                    // Fallback to: application-{env}.yml
+                    serviceEnv = path.join(centralPath, service, `application-${env}.yml`);
+                    if (fs.existsSync(serviceEnv)) {
+                        yamlPaths.push(serviceEnv);
+                    }
                 }
             }
 
@@ -121,6 +187,7 @@ export class CentralSettingsLoader {
             }
         }
 
+        logger.info(`Total configurations created: ${configs.length}`);
         return configs;
     }
 
