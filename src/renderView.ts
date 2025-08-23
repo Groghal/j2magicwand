@@ -189,18 +189,8 @@ export class J2RenderView {
                             // Reload placeholders with the NEW paths
                             const placeholders = this.loadPlaceholders(configForEnv.yamlPaths);
                             
-                            // Replace all placeholders with their values
-                            const placeholderRegex = /{{([^}]+)}}/g;
-                            renderedText = text.replace(placeholderRegex, (match, variableRaw) => {
-                                const variable = variableRaw.trim();
-                                if (variable && !variable.includes(' ')) {
-                                    const value = placeholders[variable];
-                                    if (value !== undefined) {
-                                        return String(value);
-                                    }
-                                }
-                                return match;
-                            });
+                            // Replace all placeholders with their values recursively
+                            renderedText = this.replaceRecursivePlaceholders(text, placeholders);
                             
                             // Update the webview with the new content
                             // Pass the actual YAML paths to ensure they're displayed correctly
@@ -247,25 +237,53 @@ export class J2RenderView {
             const text = document.getText();
             let renderedText = text;
 
-            // Replace all placeholders with their values
-            const placeholderRegex = /{{([^}]+)}}/g;
-            renderedText = text.replace(placeholderRegex, (match, variableRaw) => {
+            // Replace all placeholders with their values recursively
+            renderedText = this.replaceRecursivePlaceholders(text, placeholders);
+
+            this.panel.webview.html = this.getWebviewContent(document, renderedText);
+        } catch (error: unknown) {
+            this.panel.webview.html = this.getWebviewContent(document, `Error rendering template: ${error}`);
+        }
+    }
+
+    /**
+     * Replaces placeholders recursively, handling cases where placeholder values contain other placeholders.
+     * @param text The text containing placeholders.
+     * @param placeholders The object containing placeholder values.
+     * @param maxDepth Maximum recursion depth to prevent infinite loops.
+     * @returns The text with all placeholders replaced.
+     */
+    private replaceRecursivePlaceholders(text: string, placeholders: Record<string, unknown>, maxDepth: number = 10): string {
+        const placeholderRegex = /{{([^}]+)}}/g;
+        let currentText = text;
+        let depth = 0;
+        let previousText = '';
+        
+        // Keep replacing until no more changes or max depth reached
+        while (depth < maxDepth && currentText !== previousText) {
+            previousText = currentText;
+            currentText = currentText.replace(placeholderRegex, (match, variableRaw) => {
                 const variable = variableRaw.trim();
                 // Only process valid variable names (no spaces)
                 if (variable && !variable.includes(' ')) {
                     const value = placeholders[variable];
                     if (value !== undefined) {
+                        // Convert value to string and it might contain more placeholders
                         return String(value);
                     }
                 }
                 // Return original if not found or invalid
                 return match;
             });
-
-            this.panel.webview.html = this.getWebviewContent(document, renderedText);
-        } catch (error: unknown) {
-            this.panel.webview.html = this.getWebviewContent(document, `Error rendering template: ${error}`);
+            depth++;
         }
+        
+        // Log warning if max depth reached
+        if (depth >= maxDepth && currentText !== previousText) {
+            logger.warn(`Maximum recursion depth (${maxDepth}) reached while replacing placeholders. Possible circular reference.`);
+        }
+        
+        return currentText;
     }
 
     /**

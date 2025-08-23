@@ -2,7 +2,7 @@
   "name": "j2magicwand",
   "displayName": "J2 Magic Wand",
   "description": "Enhanced J2 template support with YAML-based placeholders",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "author": "Kazinskiy",
   "engines": {
     "vscode": "^1.60.0"
