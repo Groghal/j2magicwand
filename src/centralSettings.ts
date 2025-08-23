@@ -118,13 +118,7 @@ export class CentralSettingsLoader {
                         yamlPaths.push(globalBase);
                     }
 
-                    // 2. Global environment file for this specific environment
-                    const globalEnv = path.join(centralPath, `application-${env}.yml`);
-                    if (fs.existsSync(globalEnv)) {
-                        yamlPaths.push(globalEnv);
-                    }
-
-                    // 3. Service base - try both patterns
+                    // 2. Service base - try both patterns
                     // First try: {service-name}.yml
                     let serviceBase = path.join(centralPath, service, `${service}.yml`);
                     if (fs.existsSync(serviceBase)) {
@@ -135,6 +129,12 @@ export class CentralSettingsLoader {
                         if (fs.existsSync(serviceBase)) {
                             yamlPaths.push(serviceBase);
                         }
+                    }
+
+                    // 3. Global environment file for this specific environment
+                    const globalEnv = path.join(centralPath, `application-${env}.yml`);
+                    if (fs.existsSync(globalEnv)) {
+                        yamlPaths.push(globalEnv);
                     }
 
                     // 4. Service environment file for this specific environment
